@@ -4,6 +4,9 @@ import random
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing as mp
 
 from rl4co.heuristic_finder.evaluate import train_fitness_phi_on_tsp20
 from rl4co.heuristic_finder.llm import (
@@ -26,6 +29,8 @@ class EvoConfig:
     num_starts: int = 8
     device: str = "cpu"
     ollama_model: Optional[str] = None
+    # Optional: parallel short-training across multiple GPUs
+    gpu_ids: Optional[List[int]] = None
 
 
 def jitter_numbers_in_code(code: str, scale: float = 0.2) -> str:
@@ -99,18 +104,8 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[PotentialSpec, float]]:
     population = make_population_from_seeds(cfg.population_size)
     scored: List[Tuple[PotentialSpec, float]] = []
 
-    # evaluate initial population
-    for spec in population:
-        score = train_fitness_phi_on_tsp20(
-            spec,
-            epochs=cfg.epochs_per_eval,
-            batch_size=cfg.batch_size,
-            train_data_size=cfg.train_size,
-            val_data_size=cfg.val_size,
-            num_starts=cfg.num_starts,
-            device=cfg.device,
-        )
-        scored.append((spec, score))
+    # evaluate initial population (possibly parallel)
+    scored.extend(_evaluate_population(population, cfg))
 
     # iterate
     for _ in range(cfg.iterations):
@@ -120,18 +115,8 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[PotentialSpec, float]]:
 
         # propose offspring
         offspring = propose_offspring(survivors, cfg)
-        # evaluate offspring
-        for spec in offspring:
-            score = train_fitness_phi_on_tsp20(
-                spec,
-                epochs=cfg.epochs_per_eval,
-                batch_size=cfg.batch_size,
-                train_data_size=cfg.train_size,
-                val_data_size=cfg.val_size,
-                num_starts=cfg.num_starts,
-                device=cfg.device,
-            )
-            scored.append((spec, score))
+        # evaluate offspring (possibly parallel)
+        scored.extend(_evaluate_population(offspring, cfg))
 
         # keep top-K as new population
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -140,3 +125,83 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[PotentialSpec, float]]:
     # final ranking
     scored.sort(key=lambda x: x[1], reverse=True)
     return scored
+
+
+def _worker_eval(args: Tuple[str, dict, Optional[int]]):
+    """Subprocess worker: evaluate one candidate on an assigned GPU (or CPU). Returns (code, score)."""
+    code, cfgd, gpu_id = args
+    accelerator = "cpu"
+    devices = 1
+    device_str = cfgd.get("device", "cpu")
+    if gpu_id is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        accelerator = "gpu"
+        devices = 1
+        device_str = "cuda"
+
+    try:
+        fn = compile_potential(code)
+        spec = PotentialSpec(name="worker", code=code, fn=fn)
+        score = train_fitness_phi_on_tsp20(
+            spec,
+            epochs=cfgd["epochs_per_eval"],
+            batch_size=cfgd["batch_size"],
+            train_data_size=cfgd["train_size"],
+            val_data_size=cfgd["val_size"],
+            num_starts=cfgd["num_starts"],
+            device=device_str,
+            accelerator=accelerator,
+            devices=devices,
+        )
+        return code, score
+    except Exception:
+        return code, float("-inf")
+
+
+def _evaluate_population(specs: List[PotentialSpec], cfg: EvoConfig) -> List[Tuple[PotentialSpec, float]]:
+    if not specs:
+        return []
+
+    code2spec = {s.code: s for s in specs}
+    results: List[Tuple[PotentialSpec, float]] = []
+
+    gpu_ids = cfg.gpu_ids or []
+    if not gpu_ids:
+        # sequential
+        for s in specs:
+            score = train_fitness_phi_on_tsp20(
+                s,
+                epochs=cfg.epochs_per_eval,
+                batch_size=cfg.batch_size,
+                train_data_size=cfg.train_size,
+                val_data_size=cfg.val_size,
+                num_starts=cfg.num_starts,
+                device=cfg.device,
+                accelerator="cpu",
+                devices=1,
+            )
+            results.append((s, score))
+        return results
+
+    # parallel across provided GPU ids
+    cfgd = {
+        "epochs_per_eval": cfg.epochs_per_eval,
+        "batch_size": cfg.batch_size,
+        "train_size": cfg.train_size,
+        "val_size": cfg.val_size,
+        "num_starts": cfg.num_starts,
+        "device": cfg.device,
+    }
+    # use 'spawn' to avoid CUDA + fork issues on Linux
+    ctx = mp.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=len(gpu_ids), mp_context=ctx) as ex:
+        futs = []
+        for i, s in enumerate(specs):
+            gpu_id = gpu_ids[i % len(gpu_ids)]
+            futs.append(ex.submit(_worker_eval, (s.code, cfgd, gpu_id)))
+        for f in as_completed(futs):
+            code, score = f.result()
+            spec = code2spec.get(code)
+            if spec is not None:
+                results.append((spec, score))
+    return results

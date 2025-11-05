@@ -91,6 +91,8 @@ def train_fitness_phi_on_tsp20(
     val_data_size: int = 256,
     num_starts: int = 8,
     device: str = "cpu",
+    accelerator: str = "cpu",
+    devices: int = 1,
 ) -> float:
     """Short POMOPBRS training as fitness; returns validation reward (higher is better).
 
@@ -111,8 +113,8 @@ def train_fitness_phi_on_tsp20(
     )
 
     trainer = RL4COTrainer(
-        accelerator="cpu",
-        devices=1,
+        accelerator=accelerator,
+        devices=devices,
         max_epochs=epochs,
         precision="32-true",
         logger=None,
