@@ -74,7 +74,11 @@ def propose_offspring(
         )
         best = max(parents, key=lambda s: len(s.code))  # naive context pick
         prompt = format_prompt("tsp", guidance) + "\nCurrent best: \n" + best.code
-        codes = generate_candidates_via_ollama(cfg.ollama_model, prompt, n=cfg.offspring_per_iter)
+        codes = generate_candidates_via_ollama(
+            cfg.ollama_model, prompt, n=cfg.offspring_per_iter, debug=True
+        )
+        if not codes:
+            print("[HeuristicFinder] No LLM candidates produced (check ollama install/model).", flush=True)
         offspring.extend(compile_candidates(codes))
 
     # 2) Local mutations
@@ -136,4 +140,3 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[PotentialSpec, float]]:
     # final ranking
     scored.sort(key=lambda x: x[1], reverse=True)
     return scored
-

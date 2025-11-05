@@ -13,8 +13,37 @@ def format_prompt(env_name: str = "tsp", guidance: str = "") -> str:
     )
 
 
+def _strip_think_tags(text: str) -> str:
+    """Remove '<think> ... </think>' blocks that some models emit."""
+    try:
+        import re
+        return re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
+    except Exception:
+        return text
+
+
+def _extract_code_block(text: str) -> str:
+    """Extract code from Markdown-style fenced blocks if present; otherwise return raw text."""
+    if not text:
+        return text
+    # look for ```python ... ``` or ``` ... ```
+    start = None
+    lang_markers = ("```python", "```py", "```")
+    for lm in lang_markers:
+        idx = text.find(lm)
+        if idx != -1:
+            start = idx + len(lm)
+            break
+    if start is None:
+        return text
+    end = text.find("```", start)
+    if end == -1:
+        return text
+    return text[start:end].strip()
+
+
 def generate_candidates_via_ollama(
-    model: str, prompt: str, n: int = 1
+    model: str, prompt: str, n: int = 1, debug: bool = False
 ) -> List[str]:
     """Generate code snippets via Ollama. Requires 'ollama' available in runtime.
 
@@ -24,13 +53,28 @@ def generate_candidates_via_ollama(
     """
     try:
         import ollama  # type: ignore
-    except Exception:
+    except Exception as e:
+        if debug:
+            print("[HeuristicFinder] Ollama Python package not found or failed to import:", e, flush=True)
         return []
 
     out: List[str] = []
-    for _ in range(n):
-        resp = ollama.generate(model=model, prompt=prompt)
-        code = resp.get("response", "")
-        out.append(code)
+    for i in range(n):
+        try:
+            resp = ollama.generate(model=model, prompt=prompt, stream=False)
+            if isinstance(resp, dict):
+                raw = resp.get("response", "")
+            else:
+                raw = str(resp)
+            cleaned = _strip_think_tags(raw)
+            code = _extract_code_block(cleaned)
+            if debug:
+                print("=" * 80, flush=True)
+                print(code, flush=True)
+                print("=" * 80, flush=True)
+            out.append(code)
+        except Exception as e:
+            if debug:
+                print(f"[HeuristicFinder] Ollama generate failed at sample {i}: {e}", flush=True)
+            continue
     return out
-
