@@ -17,7 +17,7 @@ from rl4co.heuristic_finder.llm import (
     eoh_llm_m2,
     eoh_llm_m3,
 )
-from rl4co.heuristic_finder.potential import PotentialSpec, compile_potential, seed_potentials
+from rl4co.heuristic_finder.potential import PotentialSpec, compile_potential
 
 
 @dataclass
@@ -49,9 +49,7 @@ class EvoConfig:
     
 
 
-def make_population_from_seeds(k: int) -> List[PotentialSpec]:
-    seeds = list(seed_potentials().values())
-    return seeds[:k] if k <= len(seeds) else seeds
+# Seed-based init removed: use LLM i1 for initialization
 
 
 def compile_candidates(codes: List[str]) -> List[PotentialSpec]:
@@ -68,52 +66,57 @@ def compile_candidates(codes: List[str]) -> List[PotentialSpec]:
 def propose_offspring(
     parents: List[PotentialSpec], cfg: EvoConfig
 ) -> List[PotentialSpec]:
+    """Generate exactly 5*|parents| offspring using EoH ops: e1, e2, m1, m2, m3 per parent.
+
+    - For m1/m2/m3: mutate a single parent.
+    - For e1/e2: use a small context pack that includes the current parent and a few others.
+    """
     offspring: List[PotentialSpec] = []
 
     if not cfg.ollama_model:
         print("[HeuristicFinder] Missing --ollama-model; cannot propose offspring.", flush=True)
         return offspring
 
-    # 1) EoH-style LLM proposals via Ollama: e1, e2, m1, m2, m3
-    if cfg.ollama_model:
-        # tournament selection helper
-        def pick_parent() -> PotentialSpec:
-            if cfg.tournament_k <= 1 or len(parents) <= 1:
-                return random.choice(parents)
-            cand = random.sample(parents, k=min(cfg.tournament_k, len(parents)))
-            return max(cand, key=lambda s: len(s.code))
+    # Helper to build a small parent pack with 'p' first for diversity
+    def build_pack(p: PotentialSpec, all_parents: List[PotentialSpec], k_ctx: int = 3):
+        pool = [q for q in all_parents if q is not p]
+        ctx = random.sample(pool, k=min(max(k_ctx - 1, 0), len(pool))) if pool else []
+        ordered = [p] + ctx
+        return [{"algorithm": "(no description)", "code": sp.code} for sp in ordered]
 
-        ops = ["e1", "e2", "m1", "m2", "m3"]
-        i = 0
-        while len(offspring) < cfg.offspring_per_iter:
-            op = ops[i % len(ops)]
-            i += 1
-            try:
-                if op in ("e1", "e2") and len(parents) >= 2:
-                    # package parents as list of dicts expected by EoH prompts
-                    k = min(3, len(parents))
-                    ps = parents[:k]
-                    pack = [{"algorithm": "(no description)", "code": p.code} for p in ps]
-                    if op == "e1":
-                        codes = eoh_llm_e1(cfg.ollama_model, pack, n=1, env_name="tsp", debug=True)
-                    else:
-                        codes = eoh_llm_e2(cfg.ollama_model, pack, n=1, env_name="tsp", debug=True)
-                    offspring.extend(compile_candidates(codes))
-                elif op == "m1":
-                    pa = pick_parent()
-                    codes = eoh_llm_m1(cfg.ollama_model, pa.code, n=1, env_name="tsp", debug=True)
-                    offspring.extend(compile_candidates(codes))
-                elif op == "m2":
-                    pa = pick_parent()
-                    codes = eoh_llm_m2(cfg.ollama_model, pa.code, n=1, env_name="tsp", debug=True)
-                    offspring.extend(compile_candidates(codes))
-                elif op == "m3":
-                    pa = pick_parent()
-                    codes = eoh_llm_m3(cfg.ollama_model, pa.code, n=1, env_name="tsp", debug=True)
-                    offspring.extend(compile_candidates(codes))
-            except Exception:
-                # ignore failures for robustness
-                continue
+    for p in parents:
+        try:
+            # e1
+            pack = build_pack(p, parents, k_ctx=3)
+            codes = eoh_llm_e1(cfg.ollama_model, pack, n=1, env_name="tsp", debug=True)
+            offspring.extend(compile_candidates(codes))
+        except Exception:
+            pass
+        try:
+            # e2
+            pack = build_pack(p, parents, k_ctx=3)
+            codes = eoh_llm_e2(cfg.ollama_model, pack, n=1, env_name="tsp", debug=True)
+            offspring.extend(compile_candidates(codes))
+        except Exception:
+            pass
+        try:
+            # m1
+            codes = eoh_llm_m1(cfg.ollama_model, p.code, n=1, env_name="tsp", debug=True)
+            offspring.extend(compile_candidates(codes))
+        except Exception:
+            pass
+        try:
+            # m2
+            codes = eoh_llm_m2(cfg.ollama_model, p.code, n=1, env_name="tsp", debug=True)
+            offspring.extend(compile_candidates(codes))
+        except Exception:
+            pass
+        try:
+            # m3
+            codes = eoh_llm_m3(cfg.ollama_model, p.code, n=1, env_name="tsp", debug=True)
+            offspring.extend(compile_candidates(codes))
+        except Exception:
+            pass
 
     return offspring
 
@@ -140,24 +143,24 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[PotentialSpec, float]]:
 
     # iterate
     for _ in range(cfg.iterations):
-        # select survivors (higher reward plus optional novelty)
+        # Use the entire current population as parents (size N)
         if cfg.novelty_weight > 0 and scored:
             ranked = _rank_with_novelty(scored, archive, cfg.novelty_weight)
-            survivors = [s for s, _ in ranked[: cfg.survivors]]
+            parents = [s for s, _ in ranked[: cfg.population_size]]
             scored = ranked[: cfg.population_size]
         else:
             scored.sort(key=lambda x: x[1], reverse=True)
-            survivors = [s for s, _ in scored[: cfg.survivors]]
+            parents = [s for s, _ in scored[: cfg.population_size]]
 
-        # propose offspring
-        offspring = propose_offspring(survivors, cfg)
+        # propose offspring: exactly 5N
+        offspring = propose_offspring(parents, cfg)
         # evaluate offspring (possibly parallel)
         off_results = _evaluate_population(offspring, cfg)
         scored.extend(off_results)
         if cfg.dump_dir:
             _dump_candidates(cfg.dump_dir, off_results, gen_idx=_ + 1)
 
-        # keep top-K as new population (raw fitness or novelty-adjusted)
+        # keep top-K (N) as new population (raw fitness or novelty-adjusted)
         if cfg.novelty_weight > 0 and scored:
             scored = _rank_with_novelty(scored, archive, cfg.novelty_weight)[: cfg.population_size]
         else:

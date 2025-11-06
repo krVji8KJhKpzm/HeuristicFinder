@@ -217,7 +217,8 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
         Returns a column tensor [batch, 1]
         """
         try:
-            val = self._potential_fn(state)
+            inv = InvariantTSPStateView(state)
+            val = self._potential_fn(inv)
             if not isinstance(val, torch.Tensor):
                 val = torch.as_tensor(val, device=state.locs.device, dtype=torch.float32)
             if val.dim() == 1:
@@ -230,4 +231,63 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
         except Exception:
             # Fallback to zero potential
             b = state.locs.shape[0]
-            return torch.zeros((b, 1), device=state.locs.device, dtype=torch.float32)
+        return torch.zeros((b, 1), device=state.locs.device, dtype=torch.float32)
+
+
+class InvariantTSPStateView:
+    """
+    Restricted state view exposing only node-count-invariant helpers to potential functions.
+
+    Methods mirror a subset of TSPStateView that return fixed-size tensors independent of N.
+    """
+
+    def __init__(self, base: TSPStateView):
+        self._base = base
+
+    # Progress scalars
+    def remaining_ratio(self) -> torch.Tensor:
+        return self._base.remaining_ratio()
+
+    def visited_ratio(self) -> torch.Tensor:
+        return self._base.visited_ratio()
+
+    def step_ratio(self) -> torch.Tensor:
+        return self._base.step_ratio()
+
+    # Geometry scalars/vectors (fixed size)
+    def graph_scale(self) -> torch.Tensor:
+        return self._base.graph_scale()
+
+    def nearest_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
+        return self._base.nearest_unvisited_distance(normalize=normalize)
+
+    def k_nearest_unvisited(self, k: int = 3, normalize: bool = True) -> torch.Tensor:
+        return self._base.k_nearest_unvisited(k=k, normalize=normalize)
+
+    def k_farthest_unvisited(self, k: int = 3, normalize: bool = True) -> torch.Tensor:
+        return self._base.k_farthest_unvisited(k=k, normalize=normalize)
+
+    def mean_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
+        return self._base.mean_unvisited_distance(normalize=normalize)
+
+    def max_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
+        return self._base.max_unvisited_distance(normalize=normalize)
+
+    def std_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
+        return self._base.std_unvisited_distance(normalize=normalize)
+
+    def centroid_unvisited(self) -> torch.Tensor:
+        return self._base.centroid_unvisited()
+
+    def distance_to_centroid(self, normalize: bool = True) -> torch.Tensor:
+        return self._base.distance_to_centroid(normalize=normalize)
+
+    def distance_to_start(self, normalize: bool = True) -> torch.Tensor:
+        return self._base.distance_to_start(normalize=normalize)
+
+    # Optional fixed-size references
+    def current_loc(self) -> torch.Tensor:
+        return self._base.current_loc()
+
+    def start_loc(self) -> torch.Tensor:
+        return self._base.start_loc()
