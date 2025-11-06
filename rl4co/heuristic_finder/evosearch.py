@@ -88,32 +88,32 @@ def propose_offspring(
         try:
             # e1
             pack = build_pack(p, parents, k_ctx=3)
-            codes = eoh_llm_e1(cfg.ollama_model, pack, n=1, env_name="tsp", debug=True)
+            codes = eoh_llm_e1(cfg.ollama_model, pack, n=1, env_name="tsp", debug=False)
             offspring.extend(compile_candidates(codes))
         except Exception:
             pass
         try:
             # e2
             pack = build_pack(p, parents, k_ctx=3)
-            codes = eoh_llm_e2(cfg.ollama_model, pack, n=1, env_name="tsp", debug=True)
+            codes = eoh_llm_e2(cfg.ollama_model, pack, n=1, env_name="tsp", debug=False)
             offspring.extend(compile_candidates(codes))
         except Exception:
             pass
         try:
             # m1
-            codes = eoh_llm_m1(cfg.ollama_model, p.code, n=1, env_name="tsp", debug=True)
+            codes = eoh_llm_m1(cfg.ollama_model, p.code, n=1, env_name="tsp", debug=False)
             offspring.extend(compile_candidates(codes))
         except Exception:
             pass
         try:
             # m2
-            codes = eoh_llm_m2(cfg.ollama_model, p.code, n=1, env_name="tsp", debug=True)
+            codes = eoh_llm_m2(cfg.ollama_model, p.code, n=1, env_name="tsp", debug=False)
             offspring.extend(compile_candidates(codes))
         except Exception:
             pass
         try:
             # m3
-            codes = eoh_llm_m3(cfg.ollama_model, p.code, n=1, env_name="tsp", debug=True)
+            codes = eoh_llm_m3(cfg.ollama_model, p.code, n=1, env_name="tsp", debug=False)
             offspring.extend(compile_candidates(codes))
         except Exception:
             pass
@@ -125,7 +125,7 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[PotentialSpec, float]]:
     # init population via LLM i1 (EoH style)
     if not cfg.ollama_model:
         raise RuntimeError("--ollama-model is required for LLM-based initialization.")
-    init_codes = eoh_llm_i1(cfg.ollama_model, n=cfg.population_size, env_name="tsp", debug=True)
+    init_codes = eoh_llm_i1(cfg.ollama_model, n=cfg.population_size, env_name="tsp", debug=False)
     population = compile_candidates(init_codes)
     if not population:
         print(init_codes)
