@@ -33,6 +33,10 @@ nohup python run.py \
   model.val_data_size=${VAL_SIZE} \
   model.test_data_size=${TEST_SIZE} \
   model.optimizer_kwargs.lr=${LR} \
+  model.optimizer_kwargs.weight_decay=1e-6 \
+  model.lr_scheduler="MultiStepLR" \
+  model.lr_scheduler_kwargs.milestones=[80,95] \
+  model.lr_scheduler_kwargs.gamma=0.1 \
   seed=${SEED} \
   logger=csv logger.csv.name=pbrs-tsp20 \
   > train_pbrs.log 2>&1 &
@@ -50,10 +54,13 @@ nohup python run.py \
   model.val_data_size=${VAL_SIZE} \
   model.test_data_size=${TEST_SIZE} \
   model.optimizer_kwargs.lr=${LR} \
+  model.optimizer_kwargs.weight_decay=1e-6 \
+  model.lr_scheduler="MultiStepLR" \
+  model.lr_scheduler_kwargs.milestones=[80,95] \
+  model.lr_scheduler_kwargs.gamma=0.1 \
   model.num_starts=null \
   seed=${SEED} \
   logger=csv logger.csv.name=pomo-tsp20 \
   > train_baseline.log 2>&1 &
 
 echo "[INFO] Launched. Tail logs:\n  tail -f train_pbrs.log\n  tail -f train_baseline.log"
-

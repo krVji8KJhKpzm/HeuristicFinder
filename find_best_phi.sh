@@ -22,7 +22,7 @@ nohup python examples/auto_find_phi_tsp20.py \
   --ollama-model qwen3:32b \
   --num-starts 20 \
   --device gpu \
+  --dump-dir phi_generations \
   > find_best_phi.log 2>&1 &
 
 echo "[INFO] Started. Tail logs with: tail -f find_best_phi.log ollama.log" | tee -a setup.log
-

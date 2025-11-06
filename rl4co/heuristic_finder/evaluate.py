@@ -120,6 +120,7 @@ def train_fitness_phi_on_tsp20(
         logger=None,
         callbacks=[],
         reload_dataloaders_every_n_epochs=1,
+        enable_progress_bar=False,
     )
 
     trainer.fit(model)

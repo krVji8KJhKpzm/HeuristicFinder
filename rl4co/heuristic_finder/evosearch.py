@@ -31,6 +31,8 @@ class EvoConfig:
     ollama_model: Optional[str] = None
     # Optional: parallel short-training across multiple GPUs
     gpu_ids: Optional[List[int]] = None
+    # Optional dir to dump all candidate codes per generation
+    dump_dir: Optional[str] = None
 
 
 def jitter_numbers_in_code(code: str, scale: float = 0.2) -> str:
@@ -105,7 +107,10 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[PotentialSpec, float]]:
     scored: List[Tuple[PotentialSpec, float]] = []
 
     # evaluate initial population (possibly parallel)
-    scored.extend(_evaluate_population(population, cfg))
+    init_results = _evaluate_population(population, cfg)
+    scored.extend(init_results)
+    if cfg.dump_dir:
+        _dump_candidates(cfg.dump_dir, init_results, gen_idx=0)
 
     # iterate
     for _ in range(cfg.iterations):
@@ -116,7 +121,10 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[PotentialSpec, float]]:
         # propose offspring
         offspring = propose_offspring(survivors, cfg)
         # evaluate offspring (possibly parallel)
-        scored.extend(_evaluate_population(offspring, cfg))
+        off_results = _evaluate_population(offspring, cfg)
+        scored.extend(off_results)
+        if cfg.dump_dir:
+            _dump_candidates(cfg.dump_dir, off_results, gen_idx=_ + 1)
 
         # keep top-K as new population
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -205,3 +213,20 @@ def _evaluate_population(specs: List[PotentialSpec], cfg: EvoConfig) -> List[Tup
             if spec is not None:
                 results.append((spec, score))
     return results
+
+
+def _sanitize_filename(name: str) -> str:
+    return "".join(c if c.isalnum() or c in ("_", "-", ".") else "_" for c in name)[:120]
+
+
+def _dump_candidates(dump_dir: str, results: List[Tuple[PotentialSpec, float]], gen_idx: int):
+    os.makedirs(dump_dir, exist_ok=True)
+    for i, (spec, score) in enumerate(results):
+        base = f"gen{gen_idx:02d}_cand{i:03d}_{_sanitize_filename(spec.name)}_{score:.4f}.py"
+        path = os.path.join(dump_dir, base)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(f"# score={score:.6f}\n")
+                f.write(spec.code)
+        except Exception:
+            pass
