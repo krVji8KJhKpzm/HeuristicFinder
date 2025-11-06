@@ -41,6 +41,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--save-path", type=str, default="phi_best.py")
     p.add_argument("--topk", type=int, default=3, help="Print top-K after search")
     p.add_argument("--dump-dir", type=str, default=None, help="Directory to dump all candidate phi codes per generation")
+    p.add_argument("--seed", type=int, default=None, help="Fixed seed for reproducible short-training fitness evaluation")
 
     # Train after search
     p.add_argument("--train-after", action="store_true")
@@ -77,6 +78,7 @@ def main():
         ollama_model=args.ollama_model,
         gpu_ids=gpu_ids,
         dump_dir=args.dump_dir,
+        seed=args.seed,
     )
     results = evolution_search(cfg)
 

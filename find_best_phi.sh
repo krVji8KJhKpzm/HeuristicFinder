@@ -22,6 +22,7 @@ nohup python examples/auto_find_phi_tsp20.py \
   --ollama-model qwen3:32b \
   --num-starts 20 \
   --device gpu \
+  --seed 1234 \
   --dump-dir phi_generations \
   > find_best_phi.log 2>&1 &
 

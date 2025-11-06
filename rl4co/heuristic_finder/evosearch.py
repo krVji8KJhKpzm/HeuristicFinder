@@ -33,6 +33,8 @@ class EvoConfig:
     gpu_ids: Optional[List[int]] = None
     # Optional dir to dump all candidate codes per generation
     dump_dir: Optional[str] = None
+    # Optional fixed seed for reproducible short-training
+    seed: Optional[int] = None
 
 
 def jitter_numbers_in_code(code: str, scale: float = 0.2) -> str:
@@ -160,6 +162,7 @@ def _worker_eval(args: Tuple[str, dict, Optional[int]]):
             device=device_str,
             accelerator=accelerator,
             devices=devices,
+            seed=cfgd.get("seed", None),
         )
         return code, score
     except Exception:
@@ -187,6 +190,7 @@ def _evaluate_population(specs: List[PotentialSpec], cfg: EvoConfig) -> List[Tup
                 device=cfg.device,
                 accelerator="cpu",
                 devices=1,
+                seed=cfg.seed,
             )
             results.append((s, score))
         return results
@@ -199,6 +203,7 @@ def _evaluate_population(specs: List[PotentialSpec], cfg: EvoConfig) -> List[Tup
         "val_size": cfg.val_size,
         "num_starts": cfg.num_starts,
         "device": cfg.device,
+        "seed": cfg.seed,
     }
     # use 'spawn' to avoid CUDA + fork issues on Linux
     ctx = mp.get_context("spawn")

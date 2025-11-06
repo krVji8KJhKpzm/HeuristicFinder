@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 import torch
+import lightning as L
 
 from tensordict.tensordict import TensorDict
 
@@ -93,13 +94,17 @@ def train_fitness_phi_on_tsp20(
     device: str = "cpu",
     accelerator: str = "cpu",
     devices: int = 1,
+    seed: Optional[int] = None,
 ) -> float:
     """Short POMOPBRS training as fitness; returns validation reward (higher is better).
 
     Keeps budgets small for CPU; increase as needed for stronger signals.
     """
+    if seed is not None:
+        L.seed_everything(seed, workers=True)
+
     gen = TSPGenerator(num_loc=20)
-    env = TSPEnv(generator=gen)
+    env = TSPEnv(generator=gen, seed=seed)
 
     model = POMOPBRS(
         env=env,
