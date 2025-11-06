@@ -182,3 +182,5 @@ outputs/
 
 # HGS-CVRP for cvrp local search
 HGS-CVRP/
+
+phi_generations/
