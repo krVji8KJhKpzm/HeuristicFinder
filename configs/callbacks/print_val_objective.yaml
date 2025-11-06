@@ -1,0 +1,11 @@
+defaults:
+  - model_checkpoint.yaml
+  - model_summary.yaml
+  - speed_monitor.yaml
+  - learning_rate_monitor.yaml
+  - _self_
+
+# Custom printer to show objective (= - reward) at the end of each epoch
+print_val_objective:
+  _target_: rl4co.heuristic_finder.callbacks.PrintValObjective
+
