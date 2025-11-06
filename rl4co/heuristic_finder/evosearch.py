@@ -125,6 +125,7 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[PotentialSpec, float]]:
     init_codes = eoh_llm_i1(cfg.ollama_model, n=cfg.population_size, env_name="tsp", debug=True)
     population = compile_candidates(init_codes)
     if not population:
+        print(init_codes)
         raise RuntimeError("LLM produced no valid initial candidates. Check Ollama and model.")
     scored: List[Tuple[PotentialSpec, float]] = []
 

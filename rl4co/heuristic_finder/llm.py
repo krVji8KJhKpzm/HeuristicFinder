@@ -105,8 +105,8 @@ def generate_candidates_via_ollama(
                 raw = str(resp)
             cleaned = _strip_think_tags(raw)
             code = _extract_code_block(cleaned)
-            if not code or "def phi" not in code:
-                code = _extract_phi_from_text(cleaned)
+            # Always trim to the function to drop any extra text
+            code = _extract_phi_from_text(code if code else cleaned)
             if debug:
                 print("=" * 80, flush=True)
                 print(code, flush=True)
@@ -168,22 +168,10 @@ def _prompt_i1(env_name: str = "tsp") -> str:
     p = _phi_prompt_parts(env_name)
     return (
         p["task"]
-        + "\nFirst, describe your new algorithm and main steps in one sentence. "
-        + "The description must be inside a brace. Next, implement it in Python as a function named "
-        + p["func_name"]
-        + ". This function should accept "
-        + str(len(p["func_inputs"]))
-        + " input(s): "
-        + _join_list_for_prompt(p["func_inputs"])  # type: ignore
-        + ". The function should return "
-        + str(len(p["func_outputs"]))
-        + " output(s): "
-        + _join_list_for_prompt(p["func_outputs"])  # type: ignore
-        + ". "
+        + "\nReturn ONLY a valid Python function named 'phi' that accepts 'state' and returns a tensor broadcastable to [B,1].\n"
         + p["inout_inf"]
         + " "
         + p["other_inf"]
-        + "\nDo not give additional explanations."
     )
 
 

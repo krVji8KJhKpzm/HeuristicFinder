@@ -71,11 +71,10 @@ def compile_potential(code: str) -> Callable[[TSPStateView], torch.Tensor]:
             except Exception:
                 pass
         c = c.strip()
-        # If no explicit function header, try to locate it
-        if "def phi" not in c:
-            m = re.search(r"def\s+phi\s*\(.*?\):[\s\S]*", c)
-            if m:
-                c = m.group(0)
+        # Always trim to the first occurrence of the phi function to drop any prose
+        m = re.search(r"def\s+phi\s*\(.*?\):[\s\S]*", c)
+        if m:
+            c = m.group(0)
         # Dedent for consistent indentation
         c = textwrap.dedent(c).strip()
         return c
