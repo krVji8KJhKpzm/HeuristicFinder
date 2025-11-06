@@ -99,10 +99,20 @@ def generate_candidates_via_ollama(
     for i in range(n):
         try:
             resp = ollama.generate(model=model, prompt=prompt, stream=False)
+            # Robustly extract the text field from various client return types
+            raw = None
             if isinstance(resp, dict):
-                raw = resp.get("response", "")
-            else:
-                raw = str(resp)
+                raw = resp.get("response", None)
+            if raw is None:
+                raw = getattr(resp, "response", None)
+            if raw is None:
+                s = str(resp)
+                try:
+                    import re
+                    m = re.search(r"response\s*=\s*(['\"])(.*?)\1", s, flags=re.DOTALL)
+                    raw = m.group(2) if m else s
+                except Exception:
+                    raw = s
             cleaned = _strip_think_tags(raw)
             code = _extract_code_block(cleaned)
             # Always trim to the function to drop any extra text
