@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
+import re
+import textwrap
 from types import MappingProxyType
 from typing import Callable, Dict, Optional
 
@@ -46,12 +48,51 @@ def _safe_exec_namespace() -> Dict[str, object]:
 
 
 def compile_potential(code: str) -> Callable[[TSPStateView], torch.Tensor]:
-    """Compile a potential function from a Python snippet defining `def phi(state): ...`.
+    """Compile a potential function from text containing `def phi(state): ...`.
 
+    Be robust to extra prose/markdown from LLMs by extracting the function body.
     The function must return a tensor-like broadcastable to [batch, 1].
     """
-    # Quick static check: ensure there are no Import statements
-    tree = ast.parse(code)
+    def sanitize(c: str) -> str:
+        c = c.replace("\r\n", "\n").replace("\r", "\n")
+        # Extract fenced code if present
+        if "```" in c:
+            try:
+                start = None
+                for lm in ("```python", "```py", "```"):
+                    idx = c.find(lm)
+                    if idx != -1:
+                        start = idx + len(lm)
+                        break
+                if start is not None:
+                    end = c.find("```", start)
+                    if end != -1:
+                        c = c[start:end]
+            except Exception:
+                pass
+        c = c.strip()
+        # If no explicit function header, try to locate it
+        if "def phi" not in c:
+            m = re.search(r"def\s+phi\s*\(.*?\):[\s\S]*", c)
+            if m:
+                c = m.group(0)
+        # Dedent for consistent indentation
+        c = textwrap.dedent(c).strip()
+        return c
+
+    code = sanitize(code)
+
+    # Parse AST with safety checks
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        # last attempt: extract only the phi function and parse again
+        m = re.search(r"def\s+phi\s*\(.*?\):[\s\S]*", code)
+        if not m:
+            raise
+        code = textwrap.dedent(m.group(0)).strip()
+        tree = ast.parse(code)
+
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal)):
             raise ValueError("Unsafe statement in potential code")
@@ -110,4 +151,3 @@ def phi(state):
         fn = compile_potential(code)
         compiled[name] = PotentialSpec(name=name, code=code, fn=fn)
     return compiled
-
