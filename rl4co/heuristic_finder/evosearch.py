@@ -83,7 +83,7 @@ def propose_offspring(
     if cfg.ollama_model:
         guidance = (
             "Optimize for larger (less negative) validation reward after 1 epoch "
-            "on TSP-20 with POMO (num_starts=8). Keep it simple and stable."
+            "on TSP-20 with POMO (num_starts=20). Keep it simple and stable."
         )
         best = max(parents, key=lambda s: len(s.code))  # naive context pick
         prompt = format_prompt("tsp", guidance) + "\nCurrent best: \n" + best.code

@@ -7,8 +7,19 @@ def format_prompt(env_name: str = "tsp", guidance: str = "") -> str:
     return (
         "You are designing a potential function Phi(state) for PBRS in "
         f"combinatorial optimization env '{env_name}'. "
-        "Return ONLY a Python function named 'phi(state)' using torch operations. "
-        "state exposes: current_loc(), unvisited_locs(), num_remaining(), etc.\n"
+        "Return ONLY a Python function named 'phi(state)' using torch ops.\n"
+        "Goal: robust, node-count-invariant heuristics (avoid dependence on N).\n"
+        "Available state helpers (all batch-friendly):\n"
+        "- current_loc() -> [B,2]; start_loc() -> [B,2]\n"
+        "- unvisited_locs() -> [B,N,2] with NaNs at visited\n"
+        "- num_remaining() -> [B]; remaining_ratio() -> [B,1]; step_ratio() -> [B,1]\n"
+        "- graph_scale() -> [B,1] bounding-box diag (use to normalize distances)\n"
+        "- distances_to_unvisited(normalize=True) -> [B,N] (NaN at visited)\n"
+        "- nearest_unvisited_distance(normalize=True) -> [B,1]\n"
+        "- k_nearest_unvisited(k=3, normalize=True) -> [B,k]\n"
+        "- centroid_unvisited() -> [B,2]; distance_to_centroid(normalize=True) -> [B,1]\n"
+        "- distance_to_start(normalize=True) -> [B,1]\n"
+        "Return a tensor broadcastable to [B,1]. Keep it simple and stable.\n"
         + guidance
     )
 
