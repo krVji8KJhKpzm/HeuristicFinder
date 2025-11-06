@@ -48,7 +48,9 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
     Adds a potential-based reward shaping term to the dense per-step reward:
         r'_t = r_t + gamma * (Phi(s_{t+1}) - Phi(s_t))
 
-    Note: get_reward(td, actions) remains the original objective (negative tour length),
+    Important: here the base per-step reward r_t is the NEGATIVE edge length so that
+    summing step rewards aligns with the original objective (reward = -tour length).
+    get_reward(td, actions) remains the original objective (negative tour length),
     ensuring evaluation stays unbiased; shaping only affects step rewards exposed during stepping.
     """
 
@@ -90,9 +92,11 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
 
         last_node_loc = gather_by_index(td["locs"], last_node)
         curr_node_loc = gather_by_index(td["locs"], current_node)
-        base_reward = torch.linalg.norm(last_node_loc - curr_node_loc, dim=-1, ord=2)[
-            :, None
-        ]
+        # Use negative edge length as base step reward to align with the
+        # environment's objective convention (reward = -tour length)
+        base_reward = -torch.linalg.norm(
+            last_node_loc - curr_node_loc, dim=-1, ord=2
+        )[:, None]
 
         td_next = td.clone()
         td_next.update(

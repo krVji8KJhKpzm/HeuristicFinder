@@ -11,6 +11,15 @@ if [[ ! -f "$BEST_PHI_FILE" ]]; then
   exit 1
 fi
 
+# GPU selection
+# Set CUDA_GPUS to the GPU ids you want to use, e.g., "0" or "0,1".
+# You can override at runtime: CUDA_GPUS=1 ./train_full_tsp20.sh
+CUDA_GPUS=${CUDA_GPUS:-0}
+export CUDA_VISIBLE_DEVICES="$CUDA_GPUS"
+# Derive number of visible devices for Lightning
+IFS=',' read -r -a GPU_ARR <<< "$CUDA_GPUS"
+NUM_DEVICES=${#GPU_ARR[@]}
+
 # Common overrides
 EPOCHS=${EPOCHS:-100}
 BATCH=${BATCH:-512}
@@ -26,7 +35,9 @@ nohup python run.py \
   experiment=routing/pomopbrs-tsp20.yaml \
   callbacks=print_val_objective.yaml \
   model.potential="file:${BEST_PHI_FILE}" \
-  trainer.enable_progress_bar=false \
+  +trainer.enable_progress_bar=false \
+  trainer.accelerator=gpu \
+  trainer.devices=${NUM_DEVICES} \
   trainer.max_epochs=${EPOCHS} \
   model.batch_size=${BATCH} \
   model.train_data_size=${TRAIN_SIZE} \
@@ -47,7 +58,9 @@ nohup python run.py \
   experiment=routing/pomo.yaml \
   callbacks=print_val_objective.yaml \
   env.generator_params.num_loc=20 \
-  trainer.enable_progress_bar=false \
+  +trainer.enable_progress_bar=false \
+  trainer.accelerator=gpu \
+  trainer.devices=${NUM_DEVICES} \
   trainer.max_epochs=${EPOCHS} \
   model.batch_size=${BATCH} \
   model.train_data_size=${TRAIN_SIZE} \

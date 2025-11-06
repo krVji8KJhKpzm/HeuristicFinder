@@ -38,8 +38,12 @@ class EvoConfig:
 
 
 def jitter_numbers_in_code(code: str, scale: float = 0.2) -> str:
-    """Simple mutation: jitter numeric literals by a percentage."""
-    def repl(m):
+    """Simple mutation: jitter float literals by a percentage.
+
+    Important: We DO NOT jitter integer literals to avoid corrupting
+    tensor dimension args like unsqueeze(1) or min(dim=-1).
+    """
+    def repl_float(m):
         s = m.group(0)
         try:
             v = float(s)
@@ -47,11 +51,11 @@ def jitter_numbers_in_code(code: str, scale: float = 0.2) -> str:
             return s
         dv = (random.random() * 2 - 1) * scale * max(1.0, abs(v))
         nv = v + dv
-        # keep reasonable precision
         return f"{nv:.6f}"
 
-    # match integers or floats (rudimentary)
-    return re.sub(r"(?<![A-Za-z_])(\d+\.\d+|\d+)(?![A-Za-z_])", repl, code)
+    # Only match decimal floats (e.g., 0.7, 3.14). Do not match integers or scientific notation.
+    # This avoids changing dims like -1, 1, 2 used by unsqueeze/min/etc.
+    return re.sub(r"(?<![A-Za-z_])-?\d+\.\d+(?![A-Za-z_])", repl_float, code)
 
 
 def make_population_from_seeds(k: int) -> List[PotentialSpec]:
