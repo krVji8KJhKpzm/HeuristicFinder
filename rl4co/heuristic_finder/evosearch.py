@@ -10,8 +10,12 @@ import multiprocessing as mp
 
 from rl4co.heuristic_finder.evaluate import train_fitness_phi_on_tsp20
 from rl4co.heuristic_finder.llm import (
-    format_prompt,
-    generate_candidates_via_ollama,
+    eoh_llm_i1,
+    eoh_llm_e1,
+    eoh_llm_e2,
+    eoh_llm_m1,
+    eoh_llm_m2,
+    eoh_llm_m3,
 )
 from rl4co.heuristic_finder.potential import PotentialSpec, compile_potential, seed_potentials
 
@@ -28,7 +32,12 @@ class EvoConfig:
     val_size: int = 256
     num_starts: int = 8
     device: str = "cpu"
-    ollama_model: Optional[str] = None
+    # LLM via Ollama only
+    ollama_model: Optional[str] = None  # e.g., 'qwen3:32b'
+    # EoH-style evolution controls (always enabled)
+    frac_crossover: float = 0.5         # fraction of offspring via crossover
+    tournament_k: int = 2               # tournament size for selecting parents
+    novelty_weight: float = 0.0         # add small novelty pressure in selection
     # Optional: parallel short-training across multiple GPUs
     gpu_ids: Optional[List[int]] = None
     # Optional dir to dump all candidate codes per generation
@@ -37,25 +46,7 @@ class EvoConfig:
     seed: Optional[int] = None
 
 
-def jitter_numbers_in_code(code: str, scale: float = 0.2) -> str:
-    """Simple mutation: jitter float literals by a percentage.
-
-    Important: We DO NOT jitter integer literals to avoid corrupting
-    tensor dimension args like unsqueeze(1) or min(dim=-1).
-    """
-    def repl_float(m):
-        s = m.group(0)
-        try:
-            v = float(s)
-        except Exception:
-            return s
-        dv = (random.random() * 2 - 1) * scale * max(1.0, abs(v))
-        nv = v + dv
-        return f"{nv:.6f}"
-
-    # Only match decimal floats (e.g., 0.7, 3.14). Do not match integers or scientific notation.
-    # This avoids changing dims like -1, 1, 2 used by unsqueeze/min/etc.
-    return re.sub(r"(?<![A-Za-z_])-?\d+\.\d+(?![A-Za-z_])", repl_float, code)
+    
 
 
 def make_population_from_seeds(k: int) -> List[PotentialSpec]:
@@ -79,38 +70,66 @@ def propose_offspring(
 ) -> List[PotentialSpec]:
     offspring: List[PotentialSpec] = []
 
-    # 1) LLM proposals
-    if cfg.ollama_model:
-        guidance = (
-            "Optimize for larger (less negative) validation reward after 1 epoch "
-            "on TSP-20 with POMO (num_starts=20). Keep it simple and stable."
-        )
-        best = max(parents, key=lambda s: len(s.code))  # naive context pick
-        prompt = format_prompt("tsp", guidance) + "\nCurrent best: \n" + best.code
-        codes = generate_candidates_via_ollama(
-            cfg.ollama_model, prompt, n=cfg.offspring_per_iter, debug=True
-        )
-        if not codes:
-            print("[HeuristicFinder] No LLM candidates produced (check ollama install/model).", flush=True)
-        offspring.extend(compile_candidates(codes))
+    if not cfg.ollama_model:
+        print("[HeuristicFinder] Missing --ollama-model; cannot propose offspring.", flush=True)
+        return offspring
 
-    # 2) Local mutations
-    while len(offspring) < cfg.offspring_per_iter:
-        p = random.choice(parents)
-        mutated_code = jitter_numbers_in_code(p.code)
-        try:
-            fn = compile_potential(mutated_code)
-        except Exception:
-            continue
-        offspring.append(PotentialSpec(name=p.name+"_mut", code=mutated_code, fn=fn))
+    # 1) EoH-style LLM proposals via Ollama: e1, e2, m1, m2, m3
+    if cfg.ollama_model:
+        # tournament selection helper
+        def pick_parent() -> PotentialSpec:
+            if cfg.tournament_k <= 1 or len(parents) <= 1:
+                return random.choice(parents)
+            cand = random.sample(parents, k=min(cfg.tournament_k, len(parents)))
+            return max(cand, key=lambda s: len(s.code))
+
+        ops = ["e1", "e2", "m1", "m2", "m3"]
+        i = 0
+        while len(offspring) < cfg.offspring_per_iter:
+            op = ops[i % len(ops)]
+            i += 1
+            try:
+                if op in ("e1", "e2") and len(parents) >= 2:
+                    # package parents as list of dicts expected by EoH prompts
+                    k = min(3, len(parents))
+                    ps = parents[:k]
+                    pack = [{"algorithm": "(no description)", "code": p.code} for p in ps]
+                    if op == "e1":
+                        codes = eoh_llm_e1(cfg.ollama_model, pack, n=1, env_name="tsp", debug=True)
+                    else:
+                        codes = eoh_llm_e2(cfg.ollama_model, pack, n=1, env_name="tsp", debug=True)
+                    offspring.extend(compile_candidates(codes))
+                elif op == "m1":
+                    pa = pick_parent()
+                    codes = eoh_llm_m1(cfg.ollama_model, pa.code, n=1, env_name="tsp", debug=True)
+                    offspring.extend(compile_candidates(codes))
+                elif op == "m2":
+                    pa = pick_parent()
+                    codes = eoh_llm_m2(cfg.ollama_model, pa.code, n=1, env_name="tsp", debug=True)
+                    offspring.extend(compile_candidates(codes))
+                elif op == "m3":
+                    pa = pick_parent()
+                    codes = eoh_llm_m3(cfg.ollama_model, pa.code, n=1, env_name="tsp", debug=True)
+                    offspring.extend(compile_candidates(codes))
+            except Exception:
+                # ignore failures for robustness
+                continue
 
     return offspring
 
 
 def evolution_search(cfg: EvoConfig) -> List[Tuple[PotentialSpec, float]]:
-    # init population from seeds and possibly from LLM in the first round
-    population = make_population_from_seeds(cfg.population_size)
+    # init population via LLM i1 (EoH style)
+    if not cfg.ollama_model:
+        raise RuntimeError("--ollama-model is required for LLM-based initialization.")
+    init_codes = eoh_llm_i1(cfg.ollama_model, n=cfg.population_size, env_name="tsp", debug=True)
+    population = compile_candidates(init_codes)
+    if not population:
+        raise RuntimeError("LLM produced no valid initial candidates. Check Ollama and model.")
     scored: List[Tuple[PotentialSpec, float]] = []
+
+    # novelty archive (store fingerprints of best-so-far)
+    archive: List[Tuple[str, set]] = []  # (code, fingerprint)
 
     # evaluate initial population (possibly parallel)
     init_results = _evaluate_population(population, cfg)
@@ -120,9 +139,14 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[PotentialSpec, float]]:
 
     # iterate
     for _ in range(cfg.iterations):
-        # select survivors (higher reward is better)
-        scored.sort(key=lambda x: x[1], reverse=True)
-        survivors = [s for s, _ in scored[: cfg.survivors]]
+        # select survivors (higher reward plus optional novelty)
+        if cfg.novelty_weight > 0 and scored:
+            ranked = _rank_with_novelty(scored, archive, cfg.novelty_weight)
+            survivors = [s for s, _ in ranked[: cfg.survivors]]
+            scored = ranked[: cfg.population_size]
+        else:
+            scored.sort(key=lambda x: x[1], reverse=True)
+            survivors = [s for s, _ in scored[: cfg.survivors]]
 
         # propose offspring
         offspring = propose_offspring(survivors, cfg)
@@ -132,9 +156,21 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[PotentialSpec, float]]:
         if cfg.dump_dir:
             _dump_candidates(cfg.dump_dir, off_results, gen_idx=_ + 1)
 
-        # keep top-K as new population
-        scored.sort(key=lambda x: x[1], reverse=True)
-        scored = scored[: cfg.population_size]
+        # keep top-K as new population (raw fitness or novelty-adjusted)
+        if cfg.novelty_weight > 0 and scored:
+            scored = _rank_with_novelty(scored, archive, cfg.novelty_weight)[: cfg.population_size]
+        else:
+            scored.sort(key=lambda x: x[1], reverse=True)
+            scored = scored[: cfg.population_size]
+
+        # update novelty archive with current best
+        if scored:
+            for spec, _ in scored[: cfg.survivors]:
+                fp = _code_fingerprint(spec.code)
+                archive.append((spec.code, fp))
+            # cap archive size
+            if len(archive) > 200:
+                archive = archive[-200:]
 
     # final ranking
     scored.sort(key=lambda x: x[1], reverse=True)
@@ -222,6 +258,60 @@ def _evaluate_population(specs: List[PotentialSpec], cfg: EvoConfig) -> List[Tup
             if spec is not None:
                 results.append((spec, score))
     return results
+
+
+# ----------------- Novelty helpers (lightweight) -----------------
+def _code_fingerprint(code: str) -> set:
+    """Very simple AST-based fingerprint: set of identifier and attribute names.
+
+    Used to compute a rough Jaccard-based novelty score.
+    """
+    try:
+        import ast
+
+        tree = ast.parse(code)
+        toks = set()
+        for node in ast.walk(tree):
+            if hasattr(node, "id") and isinstance(getattr(node, "id"), str):
+                toks.add(getattr(node, "id"))
+            if hasattr(node, "attr") and isinstance(getattr(node, "attr"), str):
+                toks.add(getattr(node, "attr"))
+        return toks
+    except Exception:
+        # fallback to tokenized words
+        import re
+
+        return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", code))
+
+
+def _jaccard(a: set, b: set) -> float:
+    if not a and not b:
+        return 0.0
+    inter = len(a & b)
+    union = len(a | b)
+    return inter / union if union > 0 else 0.0
+
+
+def _novelty(code: str, archive: List[Tuple[str, set]]) -> float:
+    fp = _code_fingerprint(code)
+    if not archive:
+        return 1.0
+    sim = max((_jaccard(fp, bfp) for _, bfp in archive), default=0.0)
+    return 1.0 - sim
+
+
+def _rank_with_novelty(
+    scored: List[Tuple[PotentialSpec, float]],
+    archive: List[Tuple[str, set]],
+    novelty_weight: float,
+) -> List[Tuple[PotentialSpec, float]]:
+    # Sort by (fitness + novelty_weight * novelty)
+    decorated = []
+    for spec, fit in scored:
+        nv = _novelty(spec.code, archive)
+        decorated.append((spec, fit + novelty_weight * nv))
+    decorated.sort(key=lambda x: x[1], reverse=True)
+    return decorated
 
 
 def _sanitize_filename(name: str) -> str:

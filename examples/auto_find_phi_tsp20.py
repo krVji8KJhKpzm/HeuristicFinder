@@ -23,8 +23,11 @@ from rl4co.heuristic_finder.evosearch import EvoConfig, evolution_search
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    # Evo config
+    # Evo config (Ollama-only, EoH-enabled)
     p.add_argument("--ollama-model", type=str, default=None, help="Ollama model name, e.g., qwen3:32b")
+    p.add_argument("--frac-crossover", type=float, default=0.5, help="Fraction of offspring generated via crossover (rest via mutation)")
+    p.add_argument("--tournament-k", type=int, default=2, help="Tournament size when picking parents")
+    p.add_argument("--novelty-weight", type=float, default=0.0, help="Add small novelty pressure to survivor selection")
     p.add_argument("--population-size", type=int, default=4)
     p.add_argument("--survivors", type=int, default=2)
     p.add_argument("--iterations", type=int, default=2)
@@ -64,6 +67,10 @@ def main():
     if args.gpu_ids:
         gpu_ids = [int(x) for x in args.gpu_ids.split(",") if x.strip() != ""]
 
+    # Require an Ollama model for LLM-driven evolution
+    if not args.ollama_model:
+        raise SystemExit("--ollama-model is required for EoH evolution via Ollama.")
+
     cfg = EvoConfig(
         population_size=args.population_size,
         survivors=args.survivors,
@@ -76,6 +83,9 @@ def main():
         num_starts=args.num_starts,
         device=args.device,
         ollama_model=args.ollama_model,
+        frac_crossover=args.frac_crossover,
+        tournament_k=args.tournament_k,
+        novelty_weight=args.novelty_weight,
         gpu_ids=gpu_ids,
         dump_dir=args.dump_dir,
         seed=args.seed,

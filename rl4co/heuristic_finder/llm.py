@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional, Dict
 
 
 def format_prompt(env_name: str = "tsp", guidance: str = "") -> str:
@@ -53,6 +53,32 @@ def _extract_code_block(text: str) -> str:
     return text[start:end].strip()
 
 
+def _extract_phi_from_text(text: str) -> str:
+    """Robust fallback: extract a `def phi(...):` function from mixed text.
+
+    Strategy:
+    1) Find the first occurrence of `def phi(` and return until the next triple backticks or end of text.
+    2) If not found, fallback to a broad 'def ... return' span similar to EoH.
+    """
+    try:
+        import re
+        m = re.search(r"def\s+phi\s*\(.*?\):", text, flags=re.IGNORECASE | re.DOTALL)
+        if m:
+            tail = text[m.start():]
+            # cut at next fenced block end if present
+            fence = tail.find("```")
+            if fence != -1:
+                tail = tail[:fence]
+            return tail.strip()
+        # EoH-like coarse capture: from first 'def' to last 'return'
+        ms = re.findall(r"def[\s\S]*?return[\s\S]*", text)
+        if ms:
+            return ms[0].strip()
+    except Exception:
+        pass
+    return text
+
+
 def generate_candidates_via_ollama(
     model: str, prompt: str, n: int = 1, debug: bool = False
 ) -> List[str]:
@@ -79,6 +105,8 @@ def generate_candidates_via_ollama(
                 raw = str(resp)
             cleaned = _strip_think_tags(raw)
             code = _extract_code_block(cleaned)
+            if not code or "def phi" not in code:
+                code = _extract_phi_from_text(cleaned)
             if debug:
                 print("=" * 80, flush=True)
                 print(code, flush=True)
@@ -89,3 +117,323 @@ def generate_candidates_via_ollama(
                 print(f"[HeuristicFinder] Ollama generate failed at sample {i}: {e}", flush=True)
             continue
     return out
+
+
+# --- EoH-style prompts/operators (Ollama-only) ---
+def _phi_prompt_parts(env_name: str = "tsp") -> Dict[str, object]:
+    """Emulate EoH prompt parts for our PBRS phi(state) function."""
+    task = (
+        "Design a potential function for potential-based reward shaping (PBRS) in "
+        f"the {env_name.upper()} environment. Implement a Python function named 'phi' that"
+        " takes a single input 'state' (TSPStateView) and returns a scalar per batch"
+        " as a torch tensor broadcastable to [B,1]."
+    )
+    func_name = "phi"
+    func_inputs = ["state"]
+    func_outputs = ["value"]
+    inout_inf = (
+        "Input 'state' offers helper methods (batch-friendly):\n"
+        "- current_loc() -> [B,2]; start_loc() -> [B,2]\n"
+        "- unvisited_locs() -> [B,N,2] with NaNs at visited\n"
+        "- num_remaining() -> [B]; remaining_ratio() -> [B,1]; step_ratio() -> [B,1]\n"
+        "- graph_scale() -> [B,1] (bounding-box diagonal) for normalization\n"
+        "- distances_to_unvisited(normalize=True) -> [B,N] (NaN at visited)\n"
+        "- nearest_unvisited_distance(normalize=True) -> [B,1]\n"
+        "- k_nearest_unvisited(k=3, normalize=True) -> [B,k]\n"
+        "- centroid_unvisited() -> [B,2]; distance_to_centroid(normalize=True) -> [B,1]\n"
+        "- distance_to_start(normalize=True) -> [B,1]"
+    )
+    other_inf = (
+        "Constraints: Use only torch ops; do not import; be node-count-invariant;"
+        " normalize by graph_scale() when using distances; ensure outputs are finite"
+        " and reasonably scaled; return ONLY the Python function without any extra text."
+    )
+    return {
+        "task": task,
+        "func_name": func_name,
+        "func_inputs": func_inputs,
+        "func_outputs": func_outputs,
+        "inout_inf": inout_inf,
+        "other_inf": other_inf,
+    }
+
+
+def _join_list_for_prompt(items: List[str]) -> str:
+    if len(items) > 1:
+        return ", ".join("'" + s + "'" for s in items)
+    return "'" + items[0] + "'"
+
+
+def _prompt_i1(env_name: str = "tsp") -> str:
+    p = _phi_prompt_parts(env_name)
+    return (
+        p["task"]
+        + "\nFirst, describe your new algorithm and main steps in one sentence. "
+        + "The description must be inside a brace. Next, implement it in Python as a function named "
+        + p["func_name"]
+        + ". This function should accept "
+        + str(len(p["func_inputs"]))
+        + " input(s): "
+        + _join_list_for_prompt(p["func_inputs"])  # type: ignore
+        + ". The function should return "
+        + str(len(p["func_outputs"]))
+        + " output(s): "
+        + _join_list_for_prompt(p["func_outputs"])  # type: ignore
+        + ". "
+        + p["inout_inf"]
+        + " "
+        + p["other_inf"]
+        + "\nDo not give additional explanations."
+    )
+
+
+def _prompt_e1(parents: List[Dict[str, str]], env_name: str = "tsp") -> str:
+    p = _phi_prompt_parts(env_name)
+    prompt_indiv = ""
+    for i, ind in enumerate(parents):
+        alg = ind.get("algorithm", "(no description)")
+        code = ind.get("code", "")
+        prompt_indiv += f"No.{i+1} algorithm and the corresponding code are: \n{alg}\n{code}\n"
+    return (
+        p["task"]
+        + "\nI have "
+        + str(len(parents))
+        + " existing algorithms with their codes as follows: \n"
+        + prompt_indiv
+        + "Please help me create a new algorithm that has a totally different form from the given ones. \n"
+        + "First, describe your new algorithm and main steps in one sentence. "
+        + "The description must be inside a brace. Next, implement it in Python as a function named "
+        + p["func_name"]
+        + ". This function should accept "
+        + str(len(p["func_inputs"]))
+        + " input(s): "
+        + _join_list_for_prompt(p["func_inputs"])  # type: ignore
+        + ". The function should return "
+        + str(len(p["func_outputs"]))
+        + " output(s): "
+        + _join_list_for_prompt(p["func_outputs"])  # type: ignore
+        + ". "
+        + p["inout_inf"]
+        + " "
+        + p["other_inf"]
+        + "\nDo not give additional explanations."
+    )
+
+
+def _prompt_e2(parents: List[Dict[str, str]], env_name: str = "tsp") -> str:
+    p = _phi_prompt_parts(env_name)
+    prompt_indiv = ""
+    for i, ind in enumerate(parents):
+        alg = ind.get("algorithm", "(no description)")
+        code = ind.get("code", "")
+        prompt_indiv += f"No.{i+1} algorithm and the corresponding code are: \n{alg}\n{code}\n"
+    return (
+        p["task"]
+        + "\nI have "
+        + str(len(parents))
+        + " existing algorithms with their codes as follows: \n"
+        + prompt_indiv
+        + "Please help me create a new algorithm that has a totally different form from the given ones but can be motivated from them. \n"
+        + "Firstly, identify the common backbone idea in the provided algorithms. Secondly, based on the backbone idea describe your new algorithm in one sentence. "
+        + "The description must be inside a brace. Thirdly, implement it in Python as a function named "
+        + p["func_name"]
+        + ". This function should accept "
+        + str(len(p["func_inputs"]))
+        + " input(s): "
+        + _join_list_for_prompt(p["func_inputs"])  # type: ignore
+        + ". The function should return "
+        + str(len(p["func_outputs"]))
+        + " output(s): "
+        + _join_list_for_prompt(p["func_outputs"])  # type: ignore
+        + ". "
+        + p["inout_inf"]
+        + " "
+        + p["other_inf"]
+        + "\nDo not give additional explanations."
+    )
+
+
+def _prompt_m1(parent: Dict[str, str], env_name: str = "tsp") -> str:
+    p = _phi_prompt_parts(env_name)
+    alg = parent.get("algorithm", "(no description)")
+    code = parent.get("code", "")
+    return (
+        p["task"]
+        + "\nI have one algorithm with its code as follows. \n"
+        + "Algorithm description: "
+        + alg
+        + "\nCode:\n\n"
+        + code
+        + "\nPlease assist me in creating a new algorithm that has a different form but can be a modified version of the algorithm provided. \n"
+        + "First, describe your new algorithm and main steps in one sentence. "
+        + "The description must be inside a brace. Next, implement it in Python as a function named "
+        + p["func_name"]
+        + ". This function should accept "
+        + str(len(p["func_inputs"]))
+        + " input(s): "
+        + _join_list_for_prompt(p["func_inputs"])  # type: ignore
+        + ". The function should return "
+        + str(len(p["func_outputs"]))
+        + " output(s): "
+        + _join_list_for_prompt(p["func_outputs"])  # type: ignore
+        + ". "
+        + p["inout_inf"]
+        + " "
+        + p["other_inf"]
+        + "\nDo not give additional explanations."
+    )
+
+
+def _prompt_m2(parent: Dict[str, str], env_name: str = "tsp") -> str:
+    p = _phi_prompt_parts(env_name)
+    alg = parent.get("algorithm", "(no description)")
+    code = parent.get("code", "")
+    return (
+        p["task"]
+        + "\nI have one algorithm with its code as follows. \n"
+        + "Algorithm description: "
+        + alg
+        + "\nCode:\n\n"
+        + code
+        + "\nPlease identify the main algorithm parameters and assist me in creating a new algorithm that has a different parameter settings of the score function provided. \n"
+        + "First, describe your new algorithm and main steps in one sentence. "
+        + "The description must be inside a brace. Next, implement it in Python as a function named "
+        + p["func_name"]
+        + ". This function should accept "
+        + str(len(p["func_inputs"]))
+        + " input(s): "
+        + _join_list_for_prompt(p["func_inputs"])  # type: ignore
+        + ". The function should return "
+        + str(len(p["func_outputs"]))
+        + " output(s): "
+        + _join_list_for_prompt(p["func_outputs"])  # type: ignore
+        + ". "
+        + p["inout_inf"]
+        + " "
+        + p["other_inf"]
+        + "\nDo not give additional explanations."
+    )
+
+
+def _prompt_m3(parent: Dict[str, str], env_name: str = "tsp") -> str:
+    p = _phi_prompt_parts(env_name)
+    code = parent.get("code", "")
+    return (
+        "First, you need to identify the main components in the function below. "
+        "Next, analyze whether any of these components can be overfit to the in-distribution instances. "
+        "Then, based on your analysis, simplify the components to enhance the generalization to potential out-of-distribution instances. "
+        "Finally, provide the revised code, keeping the function name, inputs, and outputs unchanged. \n"
+        + code
+        + "\n"
+        + p["inout_inf"]
+        + "\nDo not give additional explanations."
+    )
+
+
+def eoh_llm_e1(model: str, parents: List[Dict[str, str]], n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
+    prompt = _prompt_e1(parents, env_name)
+    return generate_candidates_via_ollama(model, prompt, n=n, debug=debug)
+
+
+def eoh_llm_e2(model: str, parents: List[Dict[str, str]], n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
+    prompt = _prompt_e2(parents, env_name)
+    return generate_candidates_via_ollama(model, prompt, n=n, debug=debug)
+
+
+def eoh_llm_i1(model: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
+    prompt = _prompt_i1(env_name)
+    return generate_candidates_via_ollama(model, prompt, n=n, debug=debug)
+
+
+def eoh_llm_m1(model: str, parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
+    parent = {"algorithm": "(no description)", "code": parent_code}
+    prompt = _prompt_m1(parent, env_name)
+    return generate_candidates_via_ollama(model, prompt, n=n, debug=debug)
+
+
+def eoh_llm_m2(model: str, parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
+    parent = {"algorithm": "(no description)", "code": parent_code}
+    prompt = _prompt_m2(parent, env_name)
+    return generate_candidates_via_ollama(model, prompt, n=n, debug=debug)
+
+
+def eoh_llm_m3(model: str, parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
+    parent = {"code": parent_code}
+    prompt = _prompt_m3(parent, env_name)
+    return generate_candidates_via_ollama(model, prompt, n=n, debug=debug)
+def build_eoh_prompt(
+    operator: str,
+    env_name: str,
+    parent_a: str,
+    parent_b: Optional[str] = None,
+    guidance: str = "",
+    eval_summary: str = "",
+) -> str:
+    """Construct an instruction for an LLM to mutate or crossover `phi` code.
+
+    The LLM must output ONLY a valid Python function: `def phi(state): ...`.
+    """
+    header = format_prompt(env_name, guidance)
+    if eval_summary:
+        header += f"\nPerformance summary (for reference):\n{eval_summary}\n"
+
+    if operator.lower() == "mutate":
+        instr = (
+            "Operator: MUTATE.\n"
+            "Make small but meaningful changes to improve stability and validation reward.\n"
+            "Preserve shapes and broadcasting; avoid dependence on exact N.\n"
+            "Parent A (current):\n" + parent_a + "\n"
+            "Return ONLY the new function."
+        )
+    elif operator.lower() == "crossover" and parent_b is not None:
+        instr = (
+            "Operator: CROSSOVER.\n"
+            "Merge good ideas from two parents into a single, concise function.\n"
+            "Avoid duplicated work and keep constants well-scaled (use graph_scale).\n"
+            "Parent A:\n" + parent_a + "\n\nParent B:\n" + parent_b + "\n"
+            "Return ONLY the new function."
+        )
+    else:
+        instr = "Rewrite to improve clarity and robustness without changing I/O.\n" + parent_a
+
+    return header + "\n" + instr
+
+
+def eoh_llm_mutate(
+    model: str,
+    parent_code: str,
+    env_name: str = "tsp",
+    guidance: str = "",
+    eval_summary: str = "",
+    n: int = 1,
+    debug: bool = False,
+) -> List[str]:
+    prompt = build_eoh_prompt(
+        operator="mutate",
+        env_name=env_name,
+        parent_a=parent_code,
+        guidance=guidance,
+        eval_summary=eval_summary,
+    )
+    return generate_candidates_via_ollama(model, prompt, n=n, debug=debug)
+
+
+def eoh_llm_crossover(
+    model: str,
+    parent_a: str,
+    parent_b: str,
+    env_name: str = "tsp",
+    guidance: str = "",
+    eval_summary: str = "",
+    n: int = 1,
+    debug: bool = False,
+) -> List[str]:
+    prompt = build_eoh_prompt(
+        operator="crossover",
+        env_name=env_name,
+        parent_a=parent_a,
+        parent_b=parent_b,
+        guidance=guidance,
+        eval_summary=eval_summary,
+    )
+    return generate_candidates_via_ollama(model, prompt, n=n, debug=debug)
