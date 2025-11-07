@@ -1,7 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, Tuple, Optional
+
+import os
 
 import torch
 import lightning as L
@@ -84,6 +86,7 @@ def evaluate_phi_on_tsp20(
     )
 
 
+
 def train_fitness_phi_on_tsp20(
     phi: PotentialSpec,
     epochs: int = 1,
@@ -95,6 +98,11 @@ def train_fitness_phi_on_tsp20(
     accelerator: str = "cpu",
     devices: int = 1,
     seed: Optional[int] = None,
+    # PBRS shaping controls
+    pbrs_gamma: float = 1.0,
+    reward_scale: Optional[str] = None,  # None | "scale" | "norm" | int
+    center_dphi: bool = False,
+    norm_dphi: bool = False,
 ) -> float:
     """Short POMOPBRS training as fitness; returns validation reward (higher is better).
 
@@ -103,18 +111,26 @@ def train_fitness_phi_on_tsp20(
     if seed is not None:
         L.seed_everything(seed, workers=True)
 
+    # Optional env flags for PBRS stability
+    if center_dphi:
+        os.environ["PBRS_CENTER_DPHI"] = "1"
+    if norm_dphi:
+        os.environ["PBRS_NORM_DPHI"] = "1"
+
     gen = TSPGenerator(num_loc=20)
     env = TSPEnv(generator=gen, seed=seed)
 
     model = POMOPBRS(
         env=env,
         potential_fn=phi.fn,
+        pbrs_gamma=pbrs_gamma,
         num_starts=num_starts,
         batch_size=batch_size,
         train_data_size=train_data_size,
         val_data_size=val_data_size,
         optimizer_kwargs={"lr": 1e-4},
         metrics={"train": ["loss", "reward"], "val": ["reward"]},
+        reward_scale=reward_scale,
     )
 
     trainer = RL4COTrainer(

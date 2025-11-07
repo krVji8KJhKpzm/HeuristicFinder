@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import List, Optional, Dict
 
@@ -12,13 +12,13 @@ def format_prompt(env_name: str = "tsp", guidance: str = "") -> str:
         "Available state helpers (all batch-friendly):\n"
         "- current_loc() -> [B,2]; start_loc() -> [B,2]\n"
         "- unvisited_locs() -> [B,N,2] with NaNs at visited\n"
-        "- num_remaining() -> [B]; remaining_ratio() -> [B,1]; step_ratio() -> [B,1]\n"
-        "- graph_scale() -> [B,1] bounding-box diag (use to normalize distances)\n"
+        "- num_remaining() -> [B]; remaining_ratio() -> [B,1]; visited_ratio() -> [B,1]; step_ratio() -> [B,1]\n"
+        "- graph_scale() -> [B,1] (bbox diag, use to normalize distances); graph_aspect_ratio() -> [B,1] (dx/dy)\n"
         "- distances_to_unvisited(normalize=True) -> [B,N] (NaN at visited)\n"
         "- nearest_unvisited_distance(normalize=True) -> [B,1]\n"
-        "- k_nearest_unvisited(k=3, normalize=True) -> [B,k]\n"
-        "- centroid_unvisited() -> [B,2]; distance_to_centroid(normalize=True) -> [B,1]\n"
-        "- distance_to_start(normalize=True) -> [B,1]\n"
+        "- k_nearest_unvisited(k=3, normalize=True) -> [B,k]; k_farthest_unvisited(k=3, normalize=True) -> [B,k]\n"
+        "- centroid_unvisited() -> [B,2]; vector_to_centroid() -> [B,2]; distance_to_centroid(normalize=True) -> [B,1]\n"
+        "- distance_to_start(normalize=True) -> [B,1]; mean_unvisited_distance(normalize=True) -> [B,1]; max_unvisited_distance(normalize=True) -> [B,1]; std_unvisited_distance(normalize=True) -> [B,1]\n"
         "Return a tensor broadcastable to [B,1]. Keep it simple and stable.\n"
         + guidance
     )
@@ -145,12 +145,12 @@ def _phi_prompt_parts(env_name: str = "tsp") -> Dict[str, object]:
         "Input 'state' offers helper methods (batch-friendly):\n"
         "- current_loc() -> [B,2]; start_loc() -> [B,2]\n"
         "- unvisited_locs() -> [B,N,2] with NaNs at visited\n"
-        "- num_remaining() -> [B]; remaining_ratio() -> [B,1]; step_ratio() -> [B,1]\n"
+        "- num_remaining() -> [B]; remaining_ratio() -> [B,1]; visited_ratio() -> [B,1]; step_ratio() -> [B,1]\n"
         "- graph_scale() -> [B,1] (bounding-box diagonal) for normalization\n"
         "- distances_to_unvisited(normalize=True) -> [B,N] (NaN at visited)\n"
         "- nearest_unvisited_distance(normalize=True) -> [B,1]\n"
-        "- k_nearest_unvisited(k=3, normalize=True) -> [B,k]\n"
-        "- centroid_unvisited() -> [B,2]; distance_to_centroid(normalize=True) -> [B,1]\n"
+        "- k_nearest_unvisited(k=3, normalize=True) -> [B,k]; k_farthest_unvisited(k=3, normalize=True) -> [B,k]\n"
+        "- centroid_unvisited() -> [B,2]; vector_to_centroid() -> [B,2]; distance_to_centroid(normalize=True) -> [B,1]\n"
         "- distance_to_start(normalize=True) -> [B,1]"
     )
     other_inf = (

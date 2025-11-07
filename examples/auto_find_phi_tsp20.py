@@ -1,4 +1,4 @@
-"""
+﻿"""
 End-to-end pipeline to automatically search for the best Phi(s) on TSP-20 and optionally start full training.
 
 Steps:
@@ -40,6 +40,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--gpu-ids", type=str, default=None, help="Comma-separated GPU ids for parallel short-training, e.g., 0,1,2,3")
 
+    # PBRS tuning
+    p.add_argument("--gamma-choices", type=str, default="1.0,-0.1,0.1", help="Comma-separated gamma candidates to scan per phi")
+    p.add_argument("--reward-scale", type=str, default=None, help="Advantage scaling: None|scale|norm")
+    p.add_argument("--center-dphi", action="store_true", help="Center Delta-Phi within batch during shaping")
+    p.add_argument("--norm-dphi", action="store_true", help="Normalize Delta-Phi std within batch during shaping")
+
     # Save
     p.add_argument("--save-path", type=str, default="phi_best.py")
     p.add_argument("--topk", type=int, default=3, help="Print top-K after search")
@@ -67,6 +73,9 @@ def main():
     if args.gpu_ids:
         gpu_ids = [int(x) for x in args.gpu_ids.split(",") if x.strip() != ""]
 
+    # parse gamma list
+    gamma_choices = [float(x) for x in args.gamma_choices.split(",") if x.strip() != ""] if args.gamma_choices else []
+
     # Require an Ollama model for LLM-driven evolution
     if not args.ollama_model:
         raise SystemExit("--ollama-model is required for EoH evolution via Ollama.")
@@ -89,6 +98,10 @@ def main():
         gpu_ids=gpu_ids,
         dump_dir=args.dump_dir,
         seed=args.seed,
+        pbrs_gamma_choices=gamma_choices if gamma_choices else None,
+        reward_scale=args.reward_scale,
+        center_dphi=bool(args.center_dphi),
+        norm_dphi=bool(args.norm_dphi),
     )
     results = evolution_search(cfg)
 
@@ -96,15 +109,13 @@ def main():
     if not results:
         raise SystemExit("No candidates produced by evolution search.")
 
-    best_spec, best_score = results[0]
+    best_cand, best_score = results[0]
     save_path = os.path.abspath(args.save_path)
     with open(save_path, "w", encoding="utf-8") as f:
-        f.write(best_spec.code)
+        f.write(best_cand.spec.code)
     print("=== Top Candidates ===")
-    for spec, score in results[: args.topk]:
-        print(f"{spec.name}: val/reward={score:.4f}")
-    print(f"Saved best Phi to: {save_path} (val/reward={best_score:.4f})")
-
+    for cand, score in results[: args.topk]:
+        print(f"{cand.spec.name} [gamma={cand.gamma:+.3f}]: val/reward={score:.4f}")
     # 3) Optional: Start full training via run.py (Hydra)
     if args.train_after:
         cmd: List[str] = ["python", "run.py", "experiment=routing/pomopbrs-tsp20.yaml"]

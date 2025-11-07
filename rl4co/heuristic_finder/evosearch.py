@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import random
 import re
@@ -18,6 +18,12 @@ from rl4co.heuristic_finder.llm import (
     eoh_llm_m3,
 )
 from rl4co.heuristic_finder.potential import PotentialSpec, compile_potential
+
+@dataclass
+class Candidate:
+    """Evolutionary individual: potential function + its gamma."""
+    spec: PotentialSpec
+    gamma: float
 
 
 @dataclass
@@ -44,6 +50,10 @@ class EvoConfig:
     dump_dir: Optional[str] = None
     # Optional fixed seed for reproducible short-training
     seed: Optional[int] = None
+    pbrs_gamma_choices: Optional[List[float]] = None
+    reward_scale: Optional[str] = None
+    center_dphi: bool = False
+    norm_dphi: bool = False
 
 
     
@@ -63,74 +73,100 @@ def compile_candidates(codes: List[str]) -> List[PotentialSpec]:
     return out
 
 
-def propose_offspring(
-    parents: List[PotentialSpec], cfg: EvoConfig
-) -> List[PotentialSpec]:
-    """Generate exactly 5*|parents| offspring using EoH ops: e1, e2, m1, m2, m3 per parent.
 
-    - For m1/m2/m3: mutate a single parent.
-    - For e1/e2: use a small context pack that includes the current parent and a few others.
+def _mutate_gamma(parent_gamma: float, cfg: EvoConfig) -> float:
+    """Mutate gamma: sample from provided choices if any, otherwise jitter around parent.
+    Clamps to [-2, 2] for safety.
     """
-    offspring: List[PotentialSpec] = []
+    choices = cfg.pbrs_gamma_choices
+    if choices and len(choices) > 0:
+        import random as _r
+        return _r.choice(choices)
+    import random as _r
+    g = parent_gamma + _r.gauss(0.0, 0.2)
+    return max(min(g, 2.0), -2.0)
+
+
+def propose_offspring(parents: List[Candidate], cfg: EvoConfig) -> List[Candidate]:
+    """Generate offspring using EoH ops on code, and mutate gamma as part of genome."""
+    offspring: List[Candidate] = []
 
     if not cfg.ollama_model:
         print("[HeuristicFinder] Missing --ollama-model; cannot propose offspring.", flush=True)
         return offspring
 
     # Helper to build a small parent pack with 'p' first for diversity
-    def build_pack(p: PotentialSpec, all_parents: List[PotentialSpec], k_ctx: int = 3):
+    def build_pack(p: Candidate, all_parents: List[Candidate], k_ctx: int = 3):
         pool = [q for q in all_parents if q is not p]
         ctx = random.sample(pool, k=min(max(k_ctx - 1, 0), len(pool))) if pool else []
         ordered = [p] + ctx
-        return [{"algorithm": "(no description)", "code": sp.code} for sp in ordered]
+        return [{"algorithm": "(no description)", "code": sp.spec.code} for sp in ordered]
 
     for p in parents:
         try:
             # e1
             pack = build_pack(p, parents, k_ctx=3)
             codes = eoh_llm_e1(cfg.ollama_model, pack, n=1, env_name="tsp", debug=False)
-            offspring.extend(compile_candidates(codes))
+            for sp in compile_candidates(codes):
+                offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
         except Exception:
             pass
         try:
             # e2
             pack = build_pack(p, parents, k_ctx=3)
             codes = eoh_llm_e2(cfg.ollama_model, pack, n=1, env_name="tsp", debug=False)
-            offspring.extend(compile_candidates(codes))
+            for sp in compile_candidates(codes):
+                offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
         except Exception:
             pass
         try:
             # m1
-            codes = eoh_llm_m1(cfg.ollama_model, p.code, n=1, env_name="tsp", debug=False)
-            offspring.extend(compile_candidates(codes))
+            codes = eoh_llm_m1(cfg.ollama_model, p.spec.code, n=1, env_name="tsp", debug=False)
+            for sp in compile_candidates(codes):
+                offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
         except Exception:
             pass
         try:
             # m2
-            codes = eoh_llm_m2(cfg.ollama_model, p.code, n=1, env_name="tsp", debug=False)
-            offspring.extend(compile_candidates(codes))
+            codes = eoh_llm_m2(cfg.ollama_model, p.spec.code, n=1, env_name="tsp", debug=False)
+            for sp in compile_candidates(codes):
+                offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
         except Exception:
             pass
         try:
             # m3
-            codes = eoh_llm_m3(cfg.ollama_model, p.code, n=1, env_name="tsp", debug=False)
-            offspring.extend(compile_candidates(codes))
+            codes = eoh_llm_m3(cfg.ollama_model, p.spec.code, n=1, env_name="tsp", debug=False)
+            for sp in compile_candidates(codes):
+                offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
+        except Exception:
+            pass
+
+        # gamma-only mutation (keep code)
+        try:
+            offspring.append(Candidate(spec=p.spec, gamma=_mutate_gamma(p.gamma, cfg)))
         except Exception:
             pass
 
     return offspring
 
-
-def evolution_search(cfg: EvoConfig) -> List[Tuple[PotentialSpec, float]]:
+def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
     # init population via LLM i1 (EoH style)
     if not cfg.ollama_model:
         raise RuntimeError("--ollama-model is required for LLM-based initialization.")
     init_codes = eoh_llm_i1(cfg.ollama_model, n=cfg.population_size, env_name="tsp", debug=False)
-    population = compile_candidates(init_codes)
-    if not population:
+    specs = compile_candidates(init_codes)
+    if not specs:
         print(init_codes)
         raise RuntimeError("LLM produced no valid initial candidates. Check Ollama and model.")
-    scored: List[Tuple[PotentialSpec, float]] = []
+
+    import random
+    def _init_gamma() -> float:
+        if cfg.pbrs_gamma_choices and len(cfg.pbrs_gamma_choices) > 0:
+            return random.choice(cfg.pbrs_gamma_choices)
+        return 1.0
+
+    population: List[Candidate] = [Candidate(spec=s, gamma=_init_gamma()) for s in specs]
+    scored: List[Tuple[Candidate, float]] = []
 
     # novelty archive (store fingerprints of best-so-far)
     archive: List[Tuple[str, set]] = []  # (code, fingerprint)
@@ -164,9 +200,9 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[PotentialSpec, float]]:
 
         # update novelty archive with current best of new generation
         if scored:
-            for spec, _ in scored[: cfg.population_size]:
-                fp = _code_fingerprint(spec.code)
-                archive.append((spec.code, fp))
+            for cand, _ in scored[: cfg.population_size]:
+                fp = _code_fingerprint(cand.spec.code)
+                archive.append((cand.spec.code, fp))
             if len(archive) > 200:
                 archive = archive[-200:]
 
@@ -174,10 +210,9 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[PotentialSpec, float]]:
     scored.sort(key=lambda x: x[1], reverse=True)
     return scored
 
-
-def _worker_eval(args: Tuple[str, dict, Optional[int]]):
-    """Subprocess worker: evaluate one candidate on an assigned GPU (or CPU). Returns (code, score)."""
-    code, cfgd, gpu_id = args
+def _worker_eval(args: Tuple[Tuple[str, float], dict, Optional[int]]):
+    """Subprocess worker: evaluate one candidate on an assigned GPU (or CPU). Returns ((code,gamma), score)."""
+    (code, gamma), cfgd, gpu_id = args
     accelerator = "cpu"
     devices = 1
     device_str = cfgd.get("device", "cpu")
@@ -190,7 +225,7 @@ def _worker_eval(args: Tuple[str, dict, Optional[int]]):
     try:
         fn = compile_potential(code)
         spec = PotentialSpec(name="worker", code=code, fn=fn)
-        score = train_fitness_phi_on_tsp20(
+        sc = train_fitness_phi_on_tsp20(
             spec,
             epochs=cfgd["epochs_per_eval"],
             batch_size=cfgd["batch_size"],
@@ -201,25 +236,30 @@ def _worker_eval(args: Tuple[str, dict, Optional[int]]):
             accelerator=accelerator,
             devices=devices,
             seed=cfgd.get("seed", None),
+            pbrs_gamma=gamma,
+            reward_scale=cfgd.get("reward_scale", None),
+            center_dphi=bool(cfgd.get("center_dphi", False)),
+            norm_dphi=bool(cfgd.get("norm_dphi", False)),
         )
-        return code, score
+        tour_len = -float(sc)
+        bad_thr = float(cfgd.get("objective_bad_threshold", 4.0))
+        if tour_len > bad_thr:
+            sc = float("-inf")
+        return (code, gamma), sc
     except Exception:
-        return code, float("-inf")
-
-
-def _evaluate_population(specs: List[PotentialSpec], cfg: EvoConfig) -> List[Tuple[PotentialSpec, float]]:
+        return (code, gamma), float("-inf")`r`n`r`ndef _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
     if not specs:
         return []
 
-    code2spec = {s.code: s for s in specs}
-    results: List[Tuple[PotentialSpec, float]] = []
+    key2cand = {(c.spec.code, c.gamma): c for c in specs}
+    results: List[Tuple[Candidate, float]] = []
 
     gpu_ids = cfg.gpu_ids or []
     if not gpu_ids:
         # sequential
-        for s in specs:
+        for c in specs:
             score = train_fitness_phi_on_tsp20(
-                s,
+                c.spec,
                 epochs=cfg.epochs_per_eval,
                 batch_size=cfg.batch_size,
                 train_data_size=cfg.train_size,
@@ -229,8 +269,15 @@ def _evaluate_population(specs: List[PotentialSpec], cfg: EvoConfig) -> List[Tup
                 accelerator="cpu",
                 devices=1,
                 seed=cfg.seed,
+                pbrs_gamma=c.gamma,
+                reward_scale=cfg.reward_scale,
+                center_dphi=cfg.center_dphi,
+                norm_dphi=cfg.norm_dphi,
             )
-            results.append((s, score))
+            tour_len = -float(score)
+            if tour_len > float(cfg.objective_bad_threshold):
+                score = float("-inf")
+            results.append((c, score))
         return results
 
     # parallel across provided GPU ids
@@ -242,23 +289,26 @@ def _evaluate_population(specs: List[PotentialSpec], cfg: EvoConfig) -> List[Tup
         "num_starts": cfg.num_starts,
         "device": cfg.device,
         "seed": cfg.seed,
+        "reward_scale": cfg.reward_scale,
+        "center_dphi": cfg.center_dphi,
+        "norm_dphi": cfg.norm_dphi,
+        "objective_bad_threshold": cfg.objective_bad_threshold,
     }
     # use 'spawn' to avoid CUDA + fork issues on Linux
     ctx = mp.get_context("spawn")
     with ProcessPoolExecutor(max_workers=len(gpu_ids), mp_context=ctx) as ex:
         futs = []
-        for i, s in enumerate(specs):
+        for i, c in enumerate(specs):
             gpu_id = gpu_ids[i % len(gpu_ids)]
-            futs.append(ex.submit(_worker_eval, (s.code, cfgd, gpu_id)))
+            futs.append(ex.submit(_worker_eval, ((c.spec.code, c.gamma), cfgd, gpu_id)))
         for f in as_completed(futs):
-            code, score = f.result()
-            spec = code2spec.get(code)
-            if spec is not None:
-                results.append((spec, score))
+            key, score = f.result()
+            cand = key2cand.get(key)
+            if cand is not None:
+                results.append((cand, score))
     return results
 
-
-# ----------------- Novelty helpers (lightweight) -----------------
+# ----------------- Novelty helpers (lightweight) -----------------# ----------------- Novelty helpers (lightweight) -----------------
 def _code_fingerprint(code: str) -> set:
     """Very simple AST-based fingerprint: set of identifier and attribute names.
 
@@ -299,15 +349,15 @@ def _novelty(code: str, archive: List[Tuple[str, set]]) -> float:
 
 
 def _rank_with_novelty(
-    scored: List[Tuple[PotentialSpec, float]],
+    scored: List[Tuple[Candidate, float]],
     archive: List[Tuple[str, set]],
     novelty_weight: float,
-) -> List[Tuple[PotentialSpec, float]]:
+) -> List[Tuple[Candidate, float]]:
     # Sort by (fitness + novelty_weight * novelty)
     decorated = []
-    for spec, fit in scored:
-        nv = _novelty(spec.code, archive)
-        decorated.append((spec, fit + novelty_weight * nv))
+    for cand, fit in scored:
+        nv = _novelty(cand.spec.code, archive)
+        decorated.append((cand, fit + novelty_weight * nv))
     decorated.sort(key=lambda x: x[1], reverse=True)
     return decorated
 
@@ -316,14 +366,14 @@ def _sanitize_filename(name: str) -> str:
     return "".join(c if c.isalnum() or c in ("_", "-", ".") else "_" for c in name)[:120]
 
 
-def _dump_candidates(dump_dir: str, results: List[Tuple[PotentialSpec, float]], gen_idx: int):
+def _dump_candidates(dump_dir: str, results: List[Tuple[Candidate, float]], gen_idx: int):
     os.makedirs(dump_dir, exist_ok=True)
-    for i, (spec, score) in enumerate(results):
-        base = f"gen{gen_idx:02d}_cand{i:03d}_{_sanitize_filename(spec.name)}_{score:.4f}.py"
+    for i, (cand, score) in enumerate(results):
+        base = f"gen{gen_idx:02d}_cand{i:03d}_{_sanitize_filename(cand.spec.name)}_{score:.4f}.py"
         path = os.path.join(dump_dir, base)
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(f"# score={score:.6f}\n")
-                f.write(spec.code)
+                f.write(cand.spec.code)
         except Exception:
             pass
