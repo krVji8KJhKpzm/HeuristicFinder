@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -30,6 +30,10 @@ LR=${LR:-1e-4}
 SEED=${SEED:-1234}
 
 # 1) PBRS full training using best phi
+# Enable Phi(s) logging to train_pbrs.log
+export PBRS_LOG_PHI=${PBRS_LOG_PHI:-1}
+export PBRS_LOG_PHI_MODE=${PBRS_LOG_PHI_MODE:-first}
+export PBRS_LOG_PHI_EVERY=${PBRS_LOG_PHI_EVERY:-1}
 echo "[INFO] Starting PBRS (best phi) full training... (train_pbrs.log)"
 nohup python run.py \
   experiment=routing/pomopbrs-tsp20.yaml \

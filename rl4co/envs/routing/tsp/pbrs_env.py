@@ -1,5 +1,6 @@
-from dataclasses import dataclass
+﻿from dataclasses import dataclass
 from typing import Callable
+import os
 
 import torch
 
@@ -156,6 +157,14 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
         super().__init__(**kwargs)
         self._potential_fn = potential_fn
         self._gamma = gamma
+        # Optional logging controls via env vars
+        # PBRS_LOG_PHI=1 enables logging; modes: first|stats|all; PBRS_LOG_PHI_EVERY for throttling
+        self._log_phi_enabled = os.environ.get("PBRS_LOG_PHI", "0") not in ("0", "", "false", "False")
+        self._log_phi_mode = os.environ.get("PBRS_LOG_PHI_MODE", "first")
+        try:
+            self._log_phi_every = max(1, int(os.environ.get("PBRS_LOG_PHI_EVERY", "1")))
+        except Exception:
+            self._log_phi_every = 1
 
     @staticmethod
     def _build_state_view(td: TensorDict) -> TSPStateView:
@@ -172,6 +181,28 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
         # state view BEFORE transition
         sv_before = self._build_state_view(td)
         phi_before = self._safe_phi(sv_before)
+        # Optional Phi logging (before transition)
+        if self._log_phi_enabled:
+            # step index before transition
+            try:
+                step_idx = int(td["i"].view(-1)[0].item())
+            except Exception:
+                step_idx = 0
+            # Throttle by PBRS_LOG_PHI_EVERY
+            if (step_idx % self._log_phi_every) == 0:
+                if self._log_phi_mode == "all":
+                    vals = phi_before.squeeze(-1).detach().cpu().tolist()
+                    print(f"[PBRS] step {step_idx}: Phi(s)={vals}")
+                elif self._log_phi_mode == "stats":
+                    pb = phi_before.squeeze(-1)
+                    m = float(pb.mean().item())
+                    s = float(pb.std(unbiased=False).item())
+                    mn = float(pb.min().item())
+                    mx = float(pb.max().item())
+                    print(f"[PBRS] step {step_idx}: Phi(s) stats mean={m:.6f} std={s:.6f} min={mn:.6f} max={mx:.6f}")
+                else:  # first
+                    val0 = float(phi_before.view(-1)[0].item())
+                    print(f"[PBRS] step {step_idx}: Phi(s)={val0:.6f}")
 
         # base dense step update from parent (computes last->current edge length)
         last_node = td["current_node"].clone()
