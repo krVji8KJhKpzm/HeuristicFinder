@@ -142,37 +142,31 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[PotentialSpec, float]]:
         _dump_candidates(cfg.dump_dir, init_results, gen_idx=0)
 
     # iterate
-    for _ in range(cfg.iterations):
+    for gen_idx in range(cfg.iterations):
         # Use the entire current population as parents (size N)
-        if cfg.novelty_weight > 0 and scored:
-            ranked = _rank_with_novelty(scored, archive, cfg.novelty_weight)
-            parents = [s for s, _ in ranked[: cfg.population_size]]
-            scored = ranked[: cfg.population_size]
-        else:
-            scored.sort(key=lambda x: x[1], reverse=True)
-            parents = [s for s, _ in scored[: cfg.population_size]]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        parents = [s for s, _ in scored[: cfg.population_size]]
 
-        # propose offspring: exactly 5N
+        # propose offspring: target 5N (one e1/e2/m1/m2/m3 per parent)
         offspring = propose_offspring(parents, cfg)
+
         # evaluate offspring (possibly parallel)
         off_results = _evaluate_population(offspring, cfg)
-        scored.extend(off_results)
         if cfg.dump_dir:
-            _dump_candidates(cfg.dump_dir, off_results, gen_idx=_ + 1)
+            _dump_candidates(cfg.dump_dir, off_results, gen_idx=gen_idx + 1)
 
-        # keep top-K (N) as new population (raw fitness or novelty-adjusted)
-        if cfg.novelty_weight > 0 and scored:
-            scored = _rank_with_novelty(scored, archive, cfg.novelty_weight)[: cfg.population_size]
+        # select next generation strictly from offspring to size N
+        if cfg.novelty_weight > 0 and off_results:
+            scored = _rank_with_novelty(off_results, archive, cfg.novelty_weight)[: cfg.population_size]
         else:
-            scored.sort(key=lambda x: x[1], reverse=True)
-            scored = scored[: cfg.population_size]
+            off_results.sort(key=lambda x: x[1], reverse=True)
+            scored = off_results[: cfg.population_size]
 
-        # update novelty archive with current best
+        # update novelty archive with current best of new generation
         if scored:
-            for spec, _ in scored[: cfg.survivors]:
+            for spec, _ in scored[: cfg.population_size]:
                 fp = _code_fingerprint(spec.code)
                 archive.append((spec.code, fp))
-            # cap archive size
             if len(archive) > 200:
                 archive = archive[-200:]
 

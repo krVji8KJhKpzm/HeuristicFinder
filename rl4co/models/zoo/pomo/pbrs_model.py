@@ -67,6 +67,61 @@ class POMOPBRS(POMO):
         except Exception:
             pass
 
+    def post_setup_hook(self):
+        """After Lightning setup, print a quick estimate of Phi's scale.
+
+        We evaluate Phi(state) on a small fresh batch and also estimate a one-step
+        Delta Phi using a random valid action to help diagnose shaping magnitude.
+        """
+        try:
+            # Sample a small batch from the training generator
+            B = 128
+            td0 = self.env.generator(batch_size=[B])
+            td0 = td0.to(self.device)
+
+            # Reset both base and PBRS envs on the same batch
+            td_base = self.env.reset(td0)
+            td_pbrs = self._pbrs_env.reset(td_base.clone())
+
+            # Evaluate Phi(state) on initial states
+            sv0 = self._pbrs_env._build_state_view(td_pbrs)
+            phi0 = self._pbrs_env._safe_phi(sv0).squeeze(-1)  # [B]
+            m, s = phi0.mean().item(), phi0.std(unbiased=False).item()
+            am = phi0.abs().mean().item()
+            mn, mx = phi0.min().item(), phi0.max().item()
+
+            # Take one random valid action per instance and compute Delta Phi
+            mask = td_pbrs["action_mask"]  # [B, N]
+            rand = torch.rand_like(mask.float())
+            rand = rand.masked_fill(~mask, -1e9)
+            actions = rand.argmax(dim=-1)  # [B]
+
+            td_step = td_pbrs.clone()
+            td_step.set("action", actions)
+            sv_before = self._pbrs_env._build_state_view(td_step)
+            phi_before = self._pbrs_env._safe_phi(sv_before).squeeze(-1)
+            td_step = self._pbrs_env.step(td_step)["next"]
+            sv_after = self._pbrs_env._build_state_view(td_step)
+            phi_after = self._pbrs_env._safe_phi(sv_after).squeeze(-1)
+            dphi = (phi_after - phi_before)
+            dm, ds = dphi.mean().item(), dphi.std(unbiased=False).item()
+            dam = dphi.abs().mean().item()
+
+            log.info(
+                (
+                    f"[PBRS] Phi(state) scale (B={B}): "
+                    f"mean={m:.6f} std={s:.6f} abs_mean={am:.6f} min={mn:.6f} max={mx:.6f}"
+                )
+            )
+            log.info(
+                (
+                    f"[PBRS] Delta Phi (one random step): "
+                    f"mean={dm:.6f} std={ds:.6f} abs_mean={dam:.6f}"
+                )
+            )
+        except Exception as e:
+            log.error(f"[PBRS] Failed to evaluate Phi scale: {e}")
+
     def shared_step(
         self, batch: Any, batch_idx: int, phase: str, dataloader_idx: int = None
     ):
