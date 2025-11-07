@@ -1,12 +1,12 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import os
 import random
 import re
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
-import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
-import multiprocessing as mp
 
 from rl4co.heuristic_finder.evaluate import train_fitness_phi_on_tsp20
 from rl4co.heuristic_finder.llm import (
@@ -19,9 +19,11 @@ from rl4co.heuristic_finder.llm import (
 )
 from rl4co.heuristic_finder.potential import PotentialSpec, compile_potential
 
+
 @dataclass
 class Candidate:
     """Evolutionary individual: potential function + its gamma."""
+
     spec: PotentialSpec
     gamma: float
 
@@ -41,9 +43,9 @@ class EvoConfig:
     # LLM via Ollama only
     ollama_model: Optional[str] = None  # e.g., 'qwen3:32b'
     # EoH-style evolution controls (always enabled)
-    frac_crossover: float = 0.5         # fraction of offspring via crossover
-    tournament_k: int = 2               # tournament size for selecting parents
-    novelty_weight: float = 0.0         # add small novelty pressure in selection
+    frac_crossover: float = 0.5  # fraction of offspring via crossover
+    tournament_k: int = 2  # tournament size for selecting parents
+    novelty_weight: float = 0.0  # add small novelty pressure in selection
     # Optional: parallel short-training across multiple GPUs
     gpu_ids: Optional[List[int]] = None
     # Optional dir to dump all candidate codes per generation
@@ -58,12 +60,6 @@ class EvoConfig:
     objective_bad_threshold: float = 4.0
 
 
-    
-
-
-# Seed-based init removed: use LLM i1 for initialization
-
-
 def compile_candidates(codes: List[str]) -> List[PotentialSpec]:
     out: List[PotentialSpec] = []
     for i, code in enumerate(codes):
@@ -75,7 +71,6 @@ def compile_candidates(codes: List[str]) -> List[PotentialSpec]:
     return out
 
 
-
 def _mutate_gamma(parent_gamma: float, cfg: EvoConfig) -> float:
     """Mutate gamma: sample from provided choices if any, otherwise jitter around parent.
     Clamps to [-2, 2] for safety.
@@ -83,8 +78,10 @@ def _mutate_gamma(parent_gamma: float, cfg: EvoConfig) -> float:
     choices = cfg.pbrs_gamma_choices
     if choices and len(choices) > 0:
         import random as _r
+
         return _r.choice(choices)
     import random as _r
+
     g = parent_gamma + _r.gauss(0.0, 0.2)
     return max(min(g, 2.0), -2.0)
 
@@ -151,6 +148,7 @@ def propose_offspring(parents: List[Candidate], cfg: EvoConfig) -> List[Candidat
 
     return offspring
 
+
 def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
     # init population via LLM i1 (EoH style)
     if not cfg.ollama_model:
@@ -161,7 +159,6 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
         print(init_codes)
         raise RuntimeError("LLM produced no valid initial candidates. Check Ollama and model.")
 
-    import random
     def _init_gamma() -> float:
         if cfg.pbrs_gamma_choices and len(cfg.pbrs_gamma_choices) > 0:
             return random.choice(cfg.pbrs_gamma_choices)
@@ -185,7 +182,7 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
         scored.sort(key=lambda x: x[1], reverse=True)
         parents = [s for s, _ in scored[: cfg.population_size]]
 
-        # propose offspring: target 5N (one e1/e2/m1/m2/m3 per parent)
+        # propose offspring: target ~5N (one e1/e2/m1/m2/m3 per parent)
         offspring = propose_offspring(parents, cfg)
 
         # evaluate offspring (possibly parallel)
@@ -212,8 +209,11 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
     scored.sort(key=lambda x: x[1], reverse=True)
     return scored
 
+
 def _worker_eval(args: Tuple[Tuple[str, float], dict, Optional[int]]):
-    """Subprocess worker: evaluate one candidate on an assigned GPU (or CPU). Returns ((code,gamma), score)."""
+    """Subprocess worker: evaluate one candidate on an assigned GPU (or CPU).
+    Returns ((code,gamma), score).
+    """
     (code, gamma), cfgd, gpu_id = args
     accelerator = "cpu"
     devices = 1
@@ -249,7 +249,10 @@ def _worker_eval(args: Tuple[Tuple[str, float], dict, Optional[int]]):
             sc = float("-inf")
         return (code, gamma), sc
     except Exception:
-        return (code, gamma), float("-inf")`r`n`r`ndef _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
+        return (code, gamma), float("-inf")
+
+
+def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
     if not specs:
         return []
 
@@ -296,7 +299,7 @@ def _worker_eval(args: Tuple[Tuple[str, float], dict, Optional[int]]):
         "norm_dphi": cfg.norm_dphi,
         "objective_bad_threshold": cfg.objective_bad_threshold,
     }
-    # use 'spawn' to avoid CUDA + fork issues on Linux
+    # use 'spawn' to avoid CUDA + fork issues on Linux/Windows
     ctx = mp.get_context("spawn")
     with ProcessPoolExecutor(max_workers=len(gpu_ids), mp_context=ctx) as ex:
         futs = []
@@ -310,7 +313,8 @@ def _worker_eval(args: Tuple[Tuple[str, float], dict, Optional[int]]):
                 results.append((cand, score))
     return results
 
-# ----------------- Novelty helpers (lightweight) -----------------# ----------------- Novelty helpers (lightweight) -----------------
+
+# ----------------- Novelty helpers (lightweight) -----------------
 def _code_fingerprint(code: str) -> set:
     """Very simple AST-based fingerprint: set of identifier and attribute names.
 
@@ -329,8 +333,6 @@ def _code_fingerprint(code: str) -> set:
         return toks
     except Exception:
         # fallback to tokenized words
-        import re
-
         return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", code))
 
 
@@ -379,3 +381,4 @@ def _dump_candidates(dump_dir: str, results: List[Tuple[Candidate, float]], gen_
                 f.write(cand.spec.code)
         except Exception:
             pass
+
