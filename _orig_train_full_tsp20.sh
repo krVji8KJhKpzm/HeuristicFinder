@@ -21,9 +21,9 @@ IFS=',' read -r -a GPU_ARR <<< "$CUDA_GPUS"
 NUM_DEVICES=${#GPU_ARR[@]}
 
 # Common overrides
-EPOCHS=${EPOCHS:-100}
-BATCH=${BATCH:-512}
-TRAIN_SIZE=${TRAIN_SIZE:-200000}
+EPOCHS=${EPOCHS:-10}
+BATCH=${BATCH:-64}
+TRAIN_SIZE=${TRAIN_SIZE:-100000}
 VAL_SIZE=${VAL_SIZE:-10000}
 TEST_SIZE=${TEST_SIZE:-10000}
 LR=${LR:-1e-4}
@@ -32,31 +32,31 @@ PBRS_GAMMA=${PBRS_GAMMA:-0.1}
 
 # 1) PBRS full training using best phi
 # Enable Phi(s) logging to train_pbrs.log
-export PBRS_LOG_PHI=${PBRS_LOG_PHI:-1}
+export PBRS_LOG_PHI=${PBRS_LOG_PHI:-0}
 export PBRS_LOG_PHI_MODE=${PBRS_LOG_PHI_MODE:-first}
-export PBRS_LOG_PHI_EVERY=${PBRS_LOG_PHI_EVERY:-1}
-echo "[INFO] Starting PBRS (best phi) full training... (train_pbrs.log)"
-nohup python run.py \
-  experiment=routing/pomopbrs-tsp20.yaml \
-  callbacks=print_val_objective.yaml \
-  model.potential="file:${BEST_PHI_FILE}" \
-  +trainer.enable_progress_bar=false \
-  trainer.accelerator=gpu \
-  trainer.devices=${NUM_DEVICES} \
-  trainer.max_epochs=${EPOCHS} \
-  model.pbrs_gamma=${PBRS_GAMMA} \
-  model.batch_size=${BATCH} \
-  model.train_data_size=${TRAIN_SIZE} \
-  model.val_data_size=${VAL_SIZE} \
-  model.test_data_size=${TEST_SIZE} \
-  model.optimizer_kwargs.lr=${LR} \
-  model.optimizer_kwargs.weight_decay=1e-6 \
-  model.lr_scheduler="MultiStepLR" \
-  model.lr_scheduler_kwargs.milestones=[80,95] \
-  model.lr_scheduler_kwargs.gamma=0.1 \
-  seed=${SEED} \
-  logger=csv logger.csv.name=pbrs-tsp20 \
-  > train_pbrs.log 2>&1 &
+export PBRS_LOG_PHI_EVERY=${PBRS_LOG_PHI_EVERY:-1000}
+# echo "[INFO] Starting PBRS (best phi) full training... (train_pbrs.log)"
+# nohup python run.py \
+#   experiment=routing/pomopbrs-tsp20.yaml \
+#   callbacks=print_val_objective.yaml \
+#   model.potential="file:${BEST_PHI_FILE}" \
+#   +trainer.enable_progress_bar=false \
+#   trainer.accelerator=gpu \
+#   +trainer.devices=${NUM_DEVICES} \
+#   trainer.max_epochs=${EPOCHS} \
+#   +model.pbrs_gamma=${PBRS_GAMMA} \
+#   model.batch_size=${BATCH} \
+#   model.train_data_size=${TRAIN_SIZE} \
+#   model.val_data_size=${VAL_SIZE} \
+#   model.test_data_size=${TEST_SIZE} \
+#   model.optimizer_kwargs.lr=${LR} \
+#   model.optimizer_kwargs.weight_decay=1e-6 \
+#   model.lr_scheduler="MultiStepLR" \
+#   model.lr_scheduler_kwargs.milestones=[80,95] \
+#   model.lr_scheduler_kwargs.gamma=0.1 \
+#   seed=${SEED} \
+#   logger=csv logger.csv.name=pbrs-tsp20 \
+#   > train_pbrs.log 2>&1 &
 
 # 2) Baseline POMO full training with original reward (same budgets)
 echo "[INFO] Starting POMO baseline full training... (train_baseline.log)"
@@ -66,7 +66,7 @@ nohup python run.py \
   env.generator_params.num_loc=20 \
   +trainer.enable_progress_bar=false \
   trainer.accelerator=gpu \
-  trainer.devices=${NUM_DEVICES} \
+  +trainer.devices=${NUM_DEVICES} \
   trainer.max_epochs=${EPOCHS} \
   model.batch_size=${BATCH} \
   model.train_data_size=${TRAIN_SIZE} \
@@ -77,7 +77,7 @@ nohup python run.py \
   model.lr_scheduler="MultiStepLR" \
   model.lr_scheduler_kwargs.milestones=[80,95] \
   model.lr_scheduler_kwargs.gamma=0.1 \
-  model.num_starts=null \
+  +model.num_starts=null \
   seed=${SEED} \
   logger=csv logger.csv.name=pomo-tsp20 \
   > train_baseline.log 2>&1 &

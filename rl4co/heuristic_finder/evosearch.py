@@ -54,6 +54,8 @@ class EvoConfig:
     reward_scale: Optional[str] = None
     center_dphi: bool = False
     norm_dphi: bool = False
+    # Penalize candidates whose estimated tour length exceeds this threshold
+    objective_bad_threshold: float = 4.0
 
 
     

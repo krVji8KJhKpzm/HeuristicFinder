@@ -21,9 +21,9 @@ IFS=',' read -r -a GPU_ARR <<< "$CUDA_GPUS"
 NUM_DEVICES=${#GPU_ARR[@]}
 
 # Common overrides
-EPOCHS=${EPOCHS:-100}
-BATCH=${BATCH:-512}
-TRAIN_SIZE=${TRAIN_SIZE:-200000}
+EPOCHS=${EPOCHS:-10}
+BATCH=${BATCH:-64}
+TRAIN_SIZE=${TRAIN_SIZE:-100000}
 VAL_SIZE=${VAL_SIZE:-10000}
 TEST_SIZE=${TEST_SIZE:-10000}
 LR=${LR:-1e-4}
@@ -32,16 +32,16 @@ SEED=${SEED:-1234}
 # 1) PBRS full training using best phi
 # Enable Phi(s) logging to train_pbrs.log
 export PBRS_LOG_PHI=${PBRS_LOG_PHI:-1}
-export PBRS_LOG_PHI_MODE=${PBRS_LOG_PHI_MODE:-first}
+export PBRS_LOG_PHI_MODE=${PBRS_LOG_PHI_MODE:-stats}
 export PBRS_LOG_PHI_EVERY=${PBRS_LOG_PHI_EVERY:-1}
 echo "[INFO] Starting PBRS (best phi) full training... (train_pbrs.log)"
 nohup python run.py \
   experiment=routing/pomopbrs-tsp20.yaml \
   callbacks=print_val_objective.yaml \
   model.potential="file:${BEST_PHI_FILE}" \
-  +trainer.enable_progress_bar=false \
+  +trainer.enable_progress_bar=true \
   trainer.accelerator=gpu \
-  trainer.devices=${NUM_DEVICES} \
+  +trainer.devices=${NUM_DEVICES} \
   trainer.max_epochs=${EPOCHS} \
   model.batch_size=${BATCH} \
   model.train_data_size=${TRAIN_SIZE} \

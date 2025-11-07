@@ -33,13 +33,12 @@ class TSPStateView:
         return self.action_mask.sum(dim=-1)  # [batch]
 
     def remaining_ratio(self) -> torch.Tensor:
+        """Fraction of nodes remaining to visit in [0,1], shape [batch, 1]."""
         n = float(self.num_nodes())
         return (self.num_remaining().float() / n).unsqueeze(-1)
 
-    def visited_ratio(self) -> torch.Tensor:
-        return 1.0 - self.remaining_ratio()
-
     def step_ratio(self) -> torch.Tensor:
+        """Normalized step index i/N in [0,1], shape [batch, 1]."""
         n = float(self.num_nodes())
         return (self.i.float() / n)
 
@@ -47,27 +46,25 @@ class TSPStateView:
         return gather_by_index(self.locs, self.current_node)  # [batch, 2]
 
     def start_loc(self) -> torch.Tensor:
-        return gather_by_index(self.locs, self.first_node)  # [batch, 2]
+        """Coordinates of the first node in the tour [batch, 2]."""
+        return gather_by_index(self.locs, self.first_node)
 
     def unvisited_locs(self) -> torch.Tensor:
         mask = self.action_mask
-        return torch.where(mask.unsqueeze(-1), self.locs, torch.nan)
+        # NaN-out visited nodes for convenience
+        masked = torch.where(mask.unsqueeze(-1), self.locs, torch.nan)
+        return masked  # [batch, N, 2] with NaNs for visited
 
-    # -------- Node-count-invariant helpers --------
+    # -------- Node-count-invariant helpers (fixed-size scalars/vectors) --------
     def graph_scale(self) -> torch.Tensor:
+        """A global length scale: diagonal of the bounding box per instance [batch, 1]."""
+        # range over nodes for x and y
         x = self.locs[..., 0]
         y = self.locs[..., 1]
         dx = (x.max(dim=-1).values - x.min(dim=-1).values)
         dy = (y.max(dim=-1).values - y.min(dim=-1).values)
-        return torch.sqrt(dx * dx + dy * dy).clamp_min(1e-6).unsqueeze(-1)
-
-    def graph_aspect_ratio(self) -> torch.Tensor:
-        x = self.locs[..., 0]
-        y = self.locs[..., 1]
-        dx = (x.max(dim=-1).values - x.min(dim=-1).values)
-        dy = (y.max(dim=-1).values - y.min(dim=-1).values)
-        eps = torch.finfo(self.locs.dtype).eps
-        return (dx / (dy + eps)).unsqueeze(-1)
+        scale = torch.sqrt(dx * dx + dy * dy).clamp_min(1e-6).unsqueeze(-1)
+        return scale  # [batch, 1]
 
     def distances_to_unvisited(self, normalize: bool = True) -> torch.Tensor:
         """Distances from current node to all unvisited nodes [batch, N].
@@ -79,85 +76,78 @@ class TSPStateView:
         d = torch.linalg.norm(dif, dim=-1, ord=2)  # [B,N]
         if normalize:
             d = d / self.graph_scale()
-        return torch.where(self.action_mask, d, torch.nan)
+        # NaN-out visited
+        d = torch.where(self.action_mask, d, torch.nan)
+        return d
 
     def nearest_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
-        d = self.distances_to_unvisited(normalize=normalize)
+        """Nearest distance to any unvisited node [batch, 1]; 0 if none remain."""
+        d = self.distances_to_unvisited(normalize=normalize)  # [B,N] with NaNs
+        # replace NaNs with +inf to take min
         d_inf = torch.nan_to_num(d, nan=float("inf"))
-        mn = d_inf.min(dim=-1).values
+        mn = d_inf.min(dim=-1).values  # [B]
         mn = torch.where(torch.isinf(mn), torch.zeros_like(mn), mn)
         return mn.unsqueeze(-1)
 
     def k_nearest_unvisited(self, k: int = 3, normalize: bool = True) -> torch.Tensor:
-        d = self.distances_to_unvisited(normalize=normalize)
+        """Return k smallest distances to unvisited nodes sorted ascending [batch, k].
+
+        If fewer than k nodes remain, pad with zeros at the end.
+        """
+        d = self.distances_to_unvisited(normalize=normalize)  # [B,N]
         d_inf = torch.nan_to_num(d, nan=float("inf"))
-        vals, _ = torch.sort(d_inf, dim=-1)
+        vals, _ = torch.sort(d_inf, dim=-1)  # ascending
         topk = vals[..., :k]
+        # replace inf (no available) with 0 for stability
         topk = torch.where(torch.isinf(topk), torch.zeros_like(topk), topk)
+        # pad if N < k (should not happen for typical TSP), keep interface robust
         if topk.shape[-1] < k:
             pad = k - topk.shape[-1]
             topk = torch.nn.functional.pad(topk, (0, pad), value=0.0)
-        return topk
-
-    def k_farthest_unvisited(self, k: int = 3, normalize: bool = True) -> torch.Tensor:
-        d = self.distances_to_unvisited(normalize=normalize)
-        d_ninf = torch.nan_to_num(d, nan=float("-inf"))
-        vals, _ = torch.sort(d_ninf, dim=-1, descending=True)
-        topk = vals[..., :k]
-        topk = torch.where(torch.isinf(topk), torch.zeros_like(topk), topk)
-        if topk.shape[-1] < k:
-            pad = k - topk.shape[-1]
-            topk = torch.nn.functional.pad(topk, (0, pad), value=0.0)
-        return topk
-
-    def mean_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
-        d = self.distances_to_unvisited(normalize=normalize)
-        m = torch.nanmean(d, dim=-1)
-        return torch.nan_to_num(m, nan=0.0).unsqueeze(-1)
-
-    def max_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
-        d = self.distances_to_unvisited(normalize=normalize)
-        d_ninf = torch.nan_to_num(d, nan=float("-inf"))
-        mx = d_ninf.max(dim=-1).values
-        mx = torch.where(torch.isinf(mx), torch.zeros_like(mx), mx)
-        return mx.unsqueeze(-1)
-
-    def std_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
-        d = self.distances_to_unvisited(normalize=normalize)
-        mean = torch.nanmean(d, dim=-1)
-        mean2 = torch.nanmean(d * d, dim=-1)
-        var = torch.clamp(mean2 - mean * mean, min=0.0)
-        return torch.sqrt(var).unsqueeze(-1)
+        return topk  # [B,k]
 
     def centroid_unvisited(self) -> torch.Tensor:
-        mask = self.action_mask.float()
-        w = mask.unsqueeze(-1)
-        sum_w = mask.sum(dim=-1, keepdim=True).clamp_min(1e-6)
-        mean = (self.locs * w).nan_to_num(0.0).sum(dim=-2) / sum_w
+        """Centroid of unvisited nodes [batch, 2]; if none remain, returns current_loc()."""
+        mask = self.action_mask.float()  # [B,N]
+        w = mask.unsqueeze(-1)  # [B,N,1]
+        sum_w = mask.sum(dim=-1, keepdim=True).clamp_min(1e-6)  # [B,1]
+        mean = (self.locs * w).nan_to_num(0.0).sum(dim=-2) / sum_w  # [B,2]
+        # if none remain, fall back to current_loc
         none_left = (mask.sum(dim=-1) == 0).unsqueeze(-1)
         return torch.where(none_left, self.current_loc(), mean)
 
-    def vector_to_centroid(self) -> torch.Tensor:
-        cur = self.current_loc()
-        cen = self.centroid_unvisited()
-        vec = cen - cur
-        norm = torch.linalg.norm(vec, dim=-1, keepdim=True).clamp_min(1e-6)
-        return vec / norm
-
     def distance_to_centroid(self, normalize: bool = True) -> torch.Tensor:
+        """Distance from current node to centroid of unvisited [batch, 1]."""
         cur = self.current_loc()
         cen = self.centroid_unvisited()
         d = torch.linalg.norm(cur - cen, dim=-1, ord=2).unsqueeze(-1)
-        return d / self.graph_scale() if normalize else d
+        if normalize:
+            d = d / self.graph_scale()
+        return d
 
     def distance_to_start(self, normalize: bool = True) -> torch.Tensor:
+        """Distance from current node to start node [batch, 1]."""
         cur = self.current_loc()
         st = self.start_loc()
         d = torch.linalg.norm(cur - st, dim=-1, ord=2).unsqueeze(-1)
-        return d / self.graph_scale() if normalize else d
+        if normalize:
+            d = d / self.graph_scale()
+        return d
 
 
 class DensePBRSTSPEnv(DenseRewardTSPEnv):
+    """
+    Dense step-reward TSP environment with PBRS shaping.
+
+    Adds a potential-based reward shaping term to the dense per-step reward:
+        r'_t = r_t + gamma * (Phi(s_{t+1}) - Phi(s_t))
+
+    Important: here the base per-step reward r_t is the NEGATIVE edge length so that
+    summing step rewards aligns with the original objective (reward = -tour length).
+    get_reward(td, actions) remains the original objective (negative tour length),
+    ensuring evaluation stays unbiased; shaping only affects step rewards exposed during stepping.
+    """
+
     def __init__(
         self,
         potential_fn: Callable[[TSPStateView], torch.Tensor],
@@ -168,25 +158,17 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
         self._potential_fn = potential_fn
         self._gamma = gamma
         # Optional logging controls via env vars
+        # PBRS_LOG_PHI=1 enables logging; modes: first|stats|all; PBRS_LOG_PHI_EVERY for throttling
         self._log_phi_enabled = os.environ.get("PBRS_LOG_PHI", "0") not in ("0", "", "false", "False")
         self._log_phi_mode = os.environ.get("PBRS_LOG_PHI_MODE", "first")
         try:
             self._log_phi_every = max(1, int(os.environ.get("PBRS_LOG_PHI_EVERY", "1")))
         except Exception:
             self._log_phi_every = 1
-        # Delta-Phi normalization/centering (to stabilize shaping magnitude)
-        self._center_dphi = os.environ.get("PBRS_CENTER_DPHI", "0") not in ("0", "", "false", "False")
-        self._norm_dphi = os.environ.get("PBRS_NORM_DPHI", "0") not in ("0", "", "false", "False")
-        # Optional Delta-Phi logging
-        self._log_dphi_enabled = os.environ.get("PBRS_LOG_DPHI", "0") not in ("0", "", "false", "False")
-        self._log_dphi_mode = os.environ.get("PBRS_LOG_DPHI_MODE", "stats")
-        try:
-            self._log_dphi_every = max(1, int(os.environ.get("PBRS_LOG_DPHI_EVERY", "1")))
-        except Exception:
-            self._log_dphi_every = 1
 
     @staticmethod
     def _build_state_view(td: TensorDict) -> TSPStateView:
+        # td keys as defined in DenseRewardTSPEnv
         return TSPStateView(
             locs=td["locs"],
             i=td["i"],
@@ -196,10 +178,33 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
         )
 
     def _step(self, td: TensorDict) -> TensorDict:
-        # BEFORE transition
+        # state view BEFORE transition
         sv_before = self._build_state_view(td)
         phi_before = self._safe_phi(sv_before)
+        # Optional Phi logging (before transition)
+        if self._log_phi_enabled:
+            # step index before transition
+            try:
+                step_idx = int(td["i"].view(-1)[0].item())
+            except Exception:
+                step_idx = 0
+            # Throttle by PBRS_LOG_PHI_EVERY
+            if (step_idx % self._log_phi_every) == 0:
+                if self._log_phi_mode == "all":
+                    vals = phi_before.squeeze(-1).detach().cpu().tolist()
+                    self.print(f"[PBRS] step {step_idx}: Phi(s)={vals}")
+                elif self._log_phi_mode == "stats":
+                    pb = phi_before.squeeze(-1)
+                    m = float(pb.mean().item())
+                    s = float(pb.std(unbiased=False).item())
+                    mn = float(pb.min().item())
+                    mx = float(pb.max().item())
+                    self.print(f"[PBRS] step {step_idx}: Phi(s) stats mean={m:.6f} std={s:.6f} min={mn:.6f} max={mx:.6f}")
+                else:  # first
+                    val0 = float(phi_before.view(-1)[0].item())
+                    self.print(f"[PBRS] step {step_idx}: Phi(s)={val0:.6f}")
 
+        # base dense step update from parent (computes last->current edge length)
         last_node = td["current_node"].clone()
         current_node = td["action"]
         first_node = current_node if td["i"].all() == 0 else td["first_node"]
@@ -211,7 +216,11 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
 
         last_node_loc = gather_by_index(td["locs"], last_node)
         curr_node_loc = gather_by_index(td["locs"], current_node)
-        base_reward = -torch.linalg.norm(last_node_loc - curr_node_loc, dim=-1, ord=2)[:, None]
+        # Use negative edge length as base step reward to align with the
+        # environment's objective convention (reward = -tour length)
+        base_reward = -torch.linalg.norm(
+            last_node_loc - curr_node_loc, dim=-1, ord=2
+        )[:, None]
 
         td_next = td.clone()
         td_next.update(
@@ -223,56 +232,21 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
             }
         )
 
-        # AFTER transition
+        # state view AFTER transition
         sv_after = self._build_state_view(td_next)
         phi_after = self._safe_phi(sv_after)
 
-        dphi = (phi_after - phi_before)
-        if self._center_dphi:
-            dphi = dphi - dphi.mean(dim=0, keepdim=True)
-        if self._norm_dphi:
-            std = dphi.std(dim=0, unbiased=False, keepdim=True).clamp_min(1e-6)
-            dphi = dphi / std
+        shaped = base_reward + self._gamma * (phi_after - phi_before)
 
-        if self._log_phi_enabled:
-            try:
-                step_idx = int(td["i"].view(-1)[0].item())
-            except Exception:
-                step_idx = 0
-            if (step_idx % self._log_phi_every) == 0:
-                if self._log_phi_mode == "stats":
-                    pb = phi_before.squeeze(-1)
-                    m = float(pb.mean().item())
-                    s = float(pb.std(unbiased=False).item())
-                    mn = float(pb.min().item())
-                    mx = float(pb.max().item())
-                    print(f"[PBRS] step {step_idx}: Phi(s) stats mean={m:.6f} std={s:.6f} min={mn:.6f} max={mx:.6f}")
-                elif self._log_phi_mode == "all":
-                    vals = phi_before.squeeze(-1).detach().cpu().tolist()
-                    print(f"[PBRS] step {step_idx}: Phi(s)={vals}")
-                else:
-                    val0 = float(phi_before.view(-1)[0].item())
-                    print(f"[PBRS] step {step_idx}: Phi(s)={val0:.6f}")
-
-        if self._log_dphi_enabled:
-            try:
-                step_idx = int(td["i"].view(-1)[0].item())
-            except Exception:
-                step_idx = 0
-            if (step_idx % self._log_dphi_every) == 0:
-                dp = dphi.squeeze(-1)
-                m = float(dp.mean().item())
-                s = float(dp.std(unbiased=False).item())
-                mn = float(dp.min().item())
-                mx = float(dp.max().item())
-                print(f"[PBRS] step {step_idx}: dPhi stats mean={m:.6f} std={s:.6f} min={mn:.6f} max={mx:.6f}")
-
-        shaped = base_reward + self._gamma * dphi
         td_next.set("reward", shaped)
         td_next.set("done", done)
         return td_next
 
     def _safe_phi(self, state: TSPStateView) -> torch.Tensor:
+        """Evaluate potential with basic safety: return zeros on failure.
+
+        Returns a column tensor [batch, 1]
+        """
         try:
             inv = InvariantTSPStateView(state)
             val = self._potential_fn(inv)
@@ -281,16 +255,23 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
             if val.dim() == 1:
                 val = val.unsqueeze(-1)
             val = val.to(dtype=torch.float32, device=state.locs.device)
+            # sanitize numerical issues from user code
             val = torch.nan_to_num(val, nan=0.0, posinf=0.0, neginf=0.0)
             val = torch.clamp(val, min=-1e3, max=1e3)
             return val
         except Exception:
+            # Fallback to zero potential
             b = state.locs.shape[0]
-            return torch.zeros((b, 1), device=state.locs.device, dtype=torch.float32)
+        return torch.zeros((b, 1), device=state.locs.device, dtype=torch.float32)
 
 
 class InvariantTSPStateView:
-    """Restricted view exposing only node-count-invariant helpers to potential functions."""
+    """
+    Restricted state view exposing only node-count-invariant helpers to potential functions.
+
+    Methods mirror a subset of TSPStateView that return fixed-size tensors independent of N.
+    """
+
     def __init__(self, base: TSPStateView):
         self._base = base
 
@@ -307,9 +288,6 @@ class InvariantTSPStateView:
     # Geometry scalars/vectors (fixed size)
     def graph_scale(self) -> torch.Tensor:
         return self._base.graph_scale()
-
-    def graph_aspect_ratio(self) -> torch.Tensor:
-        return self._base.graph_aspect_ratio()
 
     def nearest_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
         return self._base.nearest_unvisited_distance(normalize=normalize)
@@ -331,9 +309,6 @@ class InvariantTSPStateView:
 
     def centroid_unvisited(self) -> torch.Tensor:
         return self._base.centroid_unvisited()
-
-    def vector_to_centroid(self) -> torch.Tensor:
-        return self._base.vector_to_centroid()
 
     def distance_to_centroid(self, normalize: bool = True) -> torch.Tensor:
         return self._base.distance_to_centroid(normalize=normalize)

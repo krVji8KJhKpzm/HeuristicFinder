@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -euo pipefail
 
 # cd to repo root (directory of this script)
@@ -15,6 +15,12 @@ sleep 3 || true
 # 2) Run evolutionary search with short-training fitness on GPUs 0,1,2,3
 #    The search process will see all GPUs; internally it will assign each candidate to one GPU.
 echo "[INFO] Launching auto_find_phi_tsp20 (logs: find_best_phi.log)" | tee -a setup.log
+# PBRS search tuning (override via env):
+#   GAMMA_CHOICES: comma list of gamma values to try per candidate
+#   REWARD_SCALE:  None|scale|norm (advantage scaling)
+#   CENTER_DPHI / NORM_DPHI are enabled by default here
+GAMMA_CHOICES=${GAMMA_CHOICES:-"1.0,-0.1,0.1"}
+REWARD_SCALE=${REWARD_SCALE:-scale}
 nohup python examples/auto_find_phi_tsp20.py \
   --gpu-ids 0,1,2,3,4,5 \
   --population-size 6 \
@@ -27,6 +33,10 @@ nohup python examples/auto_find_phi_tsp20.py \
   --train-size 100000 \
   --val-size 1000 \
   --epochs-per-eval 2 \
+  --gamma-choices "${GAMMA_CHOICES}" \
+  --reward-scale "${REWARD_SCALE}" \
+  --center-dphi \
+  --norm-dphi \
   > find_best_phi.log 2>&1 &
 
 echo "[INFO] Started. Tail logs with: tail -f find_best_phi.log ollama.log" | tee -a setup.log
