@@ -39,7 +39,6 @@ class POMOPBRS(POMO):
         first_aug_identity: bool = True,
         feats: list = None,
         num_starts: int = None,
-        pbrs_gamma: float = 1.0,
         **kwargs,
     ):
         super().__init__(
@@ -58,7 +57,7 @@ class POMOPBRS(POMO):
         # a PBRS env instance for stepwise shaped rewards (same generator to align state)
         try:
             gen = getattr(env, "generator", None)
-            self._pbrs_env = DensePBRSTSPEnv(potential_fn=potential_fn, generator=gen, gamma=pbrs_gamma)
+            self._pbrs_env = DensePBRSTSPEnv(potential_fn=potential_fn, generator=gen)
         except Exception as e:
             log.error(f"Failed to set up PBRS env: {e}")
             raise
@@ -181,7 +180,6 @@ class POMOPBRS(POMO):
             shaped_total = shaped.sum(dim=-1)  # [B, S]
             bl_val, bl_loss = self.baseline.eval(td, shaped_total, self.env)  # [B,1]
             advantage = shaped - bl_val.unsqueeze(-1)  # [B, S, L]
-            advantage = self.advantage_scaler(advantage)
             reinforce_loss = -(advantage * log_likelihood).mean()
             loss = reinforce_loss + bl_loss
             out.update({
