@@ -8,8 +8,12 @@ import json
 def format_prompt(env_name: str = "tsp", guidance: str = "") -> str:
     return (
         "You are designing a potential function Phi(state) for PBRS in "
-        f"combinatorial optimization env '{env_name}'. "
-        "Return ONLY a Python function named 'phi(state)' using torch ops.\n"
+        f"combinatorial optimization env '{env_name}'.\n"
+        "Output format (strict):\n"
+        "- Return ONLY a single fenced code block starting with: ```python and ending with: ```\n"
+        "- The code must define exactly one function: def phi(state): and nothing else.\n"
+        "- Use only torch ops; no prints, no explanations, no comments outside code.\n"
+        "- Ensure result is broadcastable to [B,1]; handle NaNs via torch.nan_to_num.\n"
         "Goal: robust, node-count-invariant heuristics (avoid dependence on N).\n"
         "Available state helpers (all batch-friendly):\n"
         "- current_loc() -> [B,2]; start_loc() -> [B,2]\n"
@@ -81,6 +85,25 @@ def _extract_phi_from_text(text: str) -> str:
     return text
 
 
+def _looks_like_phi(code: Optional[str]) -> bool:
+    if not isinstance(code, str):
+        return False
+    s = code.strip()
+    return ("def phi(" in s) and ("return" in s)
+
+
+def _build_repair_instruction(raw: str) -> str:
+    return (
+        "Convert the following content into ONLY a Python fenced code block implementing a single function '\n"
+        "def phi(state):\n' using torch ops. Requirements:\n"
+        "- Return ONLY one fenced block: ```python ... ``` with no extra text.\n"
+        "- Use provided state helpers conceptually referenced; distances with normalize=True.\n"
+        "- Output must be broadcastable to [B,1]; handle NaNs via torch.nan_to_num.\n"
+        "- Keep it stable and node-count-invariant.\n"
+        "Content begins:\n" + raw + "\nContent ends."
+    )
+
+
 def generate_candidates_via_ollama(
     model: str, prompt: str, n: int = 1, debug: bool = False
 ) -> List[str]:
@@ -117,8 +140,27 @@ def generate_candidates_via_ollama(
                     raw = s
             cleaned = _strip_think_tags(raw)
             code = _extract_code_block(cleaned)
-            # Always trim to the function to drop any extra text
             code = _extract_phi_from_text(code if code else cleaned)
+
+            # Second-pass repair if not a valid function
+            if not _looks_like_phi(code):
+                try:
+                    repair_prompt = _build_repair_instruction(cleaned)
+                    r2 = ollama.generate(model=model, prompt=repair_prompt, stream=False)
+                    r2_raw = None
+                    if isinstance(r2, dict):
+                        r2_raw = r2.get("response", None)
+                    if r2_raw is None:
+                        r2_raw = getattr(r2, "response", None)
+                    if r2_raw is None:
+                        r2_raw = str(r2)
+                    r2_clean = _strip_think_tags(r2_raw)
+                    r2_code = _extract_code_block(r2_clean)
+                    r2_code = _extract_phi_from_text(r2_code if r2_code else r2_clean)
+                    if _looks_like_phi(r2_code):
+                        code = r2_code
+                except Exception as _:
+                    pass
             if debug:
                 print("=" * 80, flush=True)
                 print(code, flush=True)
@@ -215,6 +257,63 @@ def generate_candidates_via_deepseek(
             cleaned = _strip_think_tags(raw)
             code = _extract_code_block(cleaned)
             code = _extract_phi_from_text(code if code else cleaned)
+
+            # Second-pass repair if not a valid function
+            if not _looks_like_phi(code):
+                try:
+                    repair_payload = {
+                        "model": model_name,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are a code generator. Return ONLY a single fenced Python code block"
+                                    " defining 'def phi(state):' using torch ops; no extra text."
+                                ),
+                            },
+                            {"role": "user", "content": _build_repair_instruction(cleaned)},
+                        ],
+                        "temperature": 0.2,
+                        "max_tokens": 1024,
+                        "stream": False,
+                    }
+                    try:
+                        import requests  # type: ignore
+
+                        r2 = requests.post(url, headers=headers, json=repair_payload, timeout=60)
+                        r2.raise_for_status()
+                        d2 = r2.json()
+                    except Exception:
+                        import urllib.request
+                        import urllib.error
+
+                        req2 = urllib.request.Request(
+                            url, data=json.dumps(repair_payload).encode("utf-8"), headers=headers, method="POST"
+                        )
+                        with urllib.request.urlopen(req2, timeout=60) as rr:
+                            bb = rr.read()
+                            d2 = json.loads(bb.decode("utf-8"))
+
+                    r2_raw = None
+                    try:
+                        ch = d2.get("choices", []) if isinstance(d2, dict) else []
+                        if ch:
+                            msg2 = ch[0].get("message", {})
+                            r2_raw = msg2.get("content")
+                            if not r2_raw and "reasoning_content" in msg2:
+                                r2_raw = msg2.get("reasoning_content")
+                    except Exception:
+                        r2_raw = None
+                    if r2_raw is None:
+                        r2_raw = str(d2)
+
+                    r2_clean = _strip_think_tags(r2_raw)
+                    r2_code = _extract_code_block(r2_clean)
+                    r2_code = _extract_phi_from_text(r2_code if r2_code else r2_clean)
+                    if _looks_like_phi(r2_code):
+                        code = r2_code
+                except Exception as _:
+                    pass
             if debug:
                 print("=" * 80, flush=True)
                 print(code, flush=True)
@@ -247,6 +346,80 @@ def generate_candidates(
                 print("[HeuristicFinder] Ollama path failed; falling back to DeepSeek API.", flush=True)
             # fall through to DeepSeek
     return generate_candidates_via_deepseek(prompt, n=n, model=api_model, debug=debug)
+
+
+def _reasoner_spec_prompt(context: str) -> str:
+    return (
+        "You are an expert in PBRS for TSP. Based on the following context, produce ONLY a concise JSON specification"
+        " of a potential function 'phi(state)' without any code or explanations. JSON schema:\n"
+        "{\n"
+        "  \"summary\": string,\n"
+        "  \"terms\": [\n"
+        "    {\"name\": string, \"weight\": number, \"formula\": string}\n"
+        "  ],\n"
+        "  \"constraints\": [string],\n"
+        "  \"edge_cases\": [string],\n"
+        "  \"final_formula\": string\n"
+        "}\n"
+        "Return strictly valid JSON.\n\n"
+        "Context begins:\n" + context + "\nContext ends."
+    )
+
+
+def _coder_prompt_from_spec(env_name: str, spec_text: str) -> str:
+    base = format_prompt(env_name)
+    inst = (
+        "\nImplement 'phi(state)' that follows this specification.\n"
+        "Return ONLY one fenced code block.\n"
+        "Specification (verbatim):\n" + spec_text + "\n"
+    )
+    return base + "\n" + inst
+
+
+def two_stage_generate_candidates(
+    prompt: str,
+    n: int = 1,
+    env_name: str = "tsp",
+    debug: bool = False,
+    reasoner_model: Optional[str] = None,
+    coder_ollama_model: Optional[str] = None,
+) -> List[str]:
+    """Two-stage generation: DeepSeek reasoner for spec, then Ollama (Qwen) for code.
+
+    - Stage 1 (spec): uses DeepSeek API with model from env `DEEPSEEK_MODEL` or `deepseek-reasoner`.
+    - Stage 2 (code): uses local Ollama model (e.g., qwen3:32b). If Ollama not available, falls back to DeepSeek chat.
+    """
+    # Stage 1: reasoner spec
+    spec_msgs_prompt = _reasoner_spec_prompt(prompt)
+    # Force reasoner model default
+    rm = reasoner_model or os.environ.get("DEEPSEEK_REASONER_MODEL", None) or os.environ.get("DEEPSEEK_MODEL", "deepseek-reasoner")
+    specs = generate_candidates_via_deepseek(spec_msgs_prompt, n=n, model=rm, debug=debug)
+    if not specs:
+        # fallback: use single-stage DeepSeek with stronger system prompt
+        if debug:
+            print("[HeuristicFinder] Reasoner produced no specs; falling back to single-stage generation.", flush=True)
+        return generate_candidates(prompt, n=n, debug=debug, ollama_model=coder_ollama_model)
+
+    out: List[str] = []
+    for i, spec in enumerate(specs):
+        try:
+            coder_prompt = _coder_prompt_from_spec(env_name, spec)
+            coder_model = coder_ollama_model or os.environ.get("TWO_STAGE_CODER_MODEL", None)
+            if coder_model:
+                codes = generate_candidates_via_ollama(coder_model, coder_prompt, n=1, debug=debug)
+                if not codes or not _looks_like_phi(codes[0]):
+                    # fall back to DeepSeek chat coder
+                    codes = generate_candidates_via_deepseek(coder_prompt, n=1, model=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"), debug=debug)
+            else:
+                # no Ollama model provided; try DeepSeek chat directly
+                codes = generate_candidates_via_deepseek(coder_prompt, n=1, model=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"), debug=debug)
+            if codes:
+                out.append(codes[0])
+        except Exception as e:
+            if debug:
+                print(f"[HeuristicFinder] two-stage failed at sample {i}: {e}", flush=True)
+            continue
+    return out
 
 
 # --- EoH-style prompts/operators (Ollama-only) ---
@@ -450,34 +623,46 @@ def _prompt_m3(parent: Dict[str, str], env_name: str = "tsp") -> str:
 
 def eoh_llm_e1(model: Optional[str], parents: List[Dict[str, str]], n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
     prompt = _prompt_e1(parents, env_name)
+    if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):  # reasoner -> coder(Qwen)
+        return two_stage_generate_candidates(prompt, n=n, env_name=env_name, debug=debug, coder_ollama_model=model)
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
 def eoh_llm_e2(model: Optional[str], parents: List[Dict[str, str]], n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
     prompt = _prompt_e2(parents, env_name)
+    if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):
+        return two_stage_generate_candidates(prompt, n=n, env_name=env_name, debug=debug, coder_ollama_model=model)
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
 def eoh_llm_i1(model: Optional[str], n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
     prompt = _prompt_i1(env_name)
+    if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):
+        return two_stage_generate_candidates(prompt, n=n, env_name=env_name, debug=debug, coder_ollama_model=model)
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
 def eoh_llm_m1(model: Optional[str], parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
     parent = {"algorithm": "(no description)", "code": parent_code}
     prompt = _prompt_m1(parent, env_name)
+    if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):
+        return two_stage_generate_candidates(prompt, n=n, env_name=env_name, debug=debug, coder_ollama_model=model)
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
 def eoh_llm_m2(model: Optional[str], parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
     parent = {"algorithm": "(no description)", "code": parent_code}
     prompt = _prompt_m2(parent, env_name)
+    if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):
+        return two_stage_generate_candidates(prompt, n=n, env_name=env_name, debug=debug, coder_ollama_model=model)
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
 def eoh_llm_m3(model: Optional[str], parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
     parent = {"code": parent_code}
     prompt = _prompt_m3(parent, env_name)
+    if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):
+        return two_stage_generate_candidates(prompt, n=n, env_name=env_name, debug=debug, coder_ollama_model=model)
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 def build_eoh_prompt(
     operator: str,
@@ -501,7 +686,7 @@ def build_eoh_prompt(
             "Make small but meaningful changes to improve stability and validation reward.\n"
             "Preserve shapes and broadcasting; avoid dependence on exact N.\n"
             "Parent A (current):\n" + parent_a + "\n"
-            "Return ONLY the new function."
+            "Return ONLY the new function in a fenced code block (```python ... ```), no extra text."
         )
     elif operator.lower() == "crossover" and parent_b is not None:
         instr = (
@@ -509,10 +694,14 @@ def build_eoh_prompt(
             "Merge good ideas from two parents into a single, concise function.\n"
             "Avoid duplicated work and keep constants well-scaled (use graph_scale).\n"
             "Parent A:\n" + parent_a + "\n\nParent B:\n" + parent_b + "\n"
-            "Return ONLY the new function."
+            "Return ONLY the new function in a fenced code block (```python ... ```), no extra text."
         )
     else:
-        instr = "Rewrite to improve clarity and robustness without changing I/O.\n" + parent_a
+        instr = (
+            "Rewrite to improve clarity and robustness without changing I/O.\n"
+            + parent_a
+            + "\nReturn ONLY the new function in a fenced code block (```python ... ```), no extra text."
+        )
 
     return header + "\n" + instr
 
