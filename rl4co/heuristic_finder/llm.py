@@ -157,12 +157,20 @@ def generate_candidates_via_deepseek(
         "Content-Type": "application/json",
     }
 
+    # Add a strong system prompt to force code-only outputs
+    sys_prompt = (
+        "You are a code generator. Return ONLY Python code for a single"
+        " function 'def phi(state):' using torch ops, broadcastable to [B,1]."
+        " Do not include explanations. Wrap the code in a fenced block:```python ...```"
+    )
+
     payload = {
         "model": model_name,
         "messages": [
+            {"role": "system", "content": sys_prompt},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.7,
+        "temperature": 0.3,
         "max_tokens": 1024,
         "stream": False,
     }
