@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import random
@@ -57,7 +57,7 @@ class EvoConfig:
     center_dphi: bool = False
     norm_dphi: bool = False
     # Penalize candidates whose estimated tour length exceeds this threshold
-    objective_bad_threshold: float = 4.0
+    objective_bad_threshold: float = 5.0
 
 
 def compile_candidates(codes: List[str]) -> List[PotentialSpec]:

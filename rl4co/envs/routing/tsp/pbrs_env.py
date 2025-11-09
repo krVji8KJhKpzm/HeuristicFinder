@@ -192,17 +192,17 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
             if (step_idx % self._log_phi_every) == 0:
                 if self._log_phi_mode == "all":
                     vals = phi_before.squeeze(-1).detach().cpu().tolist()
-                    self.print(f"[PBRS] step {step_idx}: Phi(s)={vals}")
+                    print(f"[PBRS] step {step_idx}: Phi(s)={vals}")
                 elif self._log_phi_mode == "stats":
                     pb = phi_before.squeeze(-1)
                     m = float(pb.mean().item())
                     s = float(pb.std(unbiased=False).item())
                     mn = float(pb.min().item())
                     mx = float(pb.max().item())
-                    self.print(f"[PBRS] step {step_idx}: Phi(s) stats mean={m:.6f} std={s:.6f} min={mn:.6f} max={mx:.6f}")
+                    print(f"[PBRS] step {step_idx}: Phi(s) stats mean={m:.6f} std={s:.6f} min={mn:.6f} max={mx:.6f}")
                 else:  # first
                     val0 = float(phi_before.view(-1)[0].item())
-                    self.print(f"[PBRS] step {step_idx}: Phi(s)={val0:.6f}")
+                    print(f"[PBRS] step {step_idx}: Phi(s)={val0:.6f}")
 
         # base dense step update from parent (computes last->current edge length)
         last_node = td["current_node"].clone()
