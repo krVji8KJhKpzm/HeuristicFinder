@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
 from typing import List, Optional, Dict
+import os
+import json
 
 
 def format_prompt(env_name: str = "tsp", guidance: str = "") -> str:
@@ -127,6 +129,116 @@ def generate_candidates_via_ollama(
                 print(f"[HeuristicFinder] Ollama generate failed at sample {i}: {e}", flush=True)
             continue
     return out
+
+
+def generate_candidates_via_deepseek(
+    prompt: str,
+    n: int = 1,
+    model: Optional[str] = None,
+    debug: bool = False,
+) -> List[str]:
+    """Generate code snippets via DeepSeek API (OpenAI-compatible).
+
+    Reads API key from env var `DEEPSEEK_API_KEY`. Optional overrides:
+    - `DEEPSEEK_MODEL` (default: 'deepseek-chat')
+    - `DEEPSEEK_API_BASE` (default: 'https://api.deepseek.com/v1')
+    """
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    if not api_key:
+        if debug:
+            print("[HeuristicFinder] DEEPSEEK_API_KEY not set; skipping DeepSeek calls.", flush=True)
+        return []
+
+    base_url = os.environ.get("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1")
+    model_name = model or os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.7,
+        "max_tokens": 1024,
+        "stream": False,
+    }
+
+    url = base_url.rstrip("/") + "/chat/completions"
+
+    out: List[str] = []
+    for i in range(n):
+        try:
+            # Prefer requests, fallback to urllib
+            try:
+                import requests  # type: ignore
+
+                resp = requests.post(url, headers=headers, json=payload, timeout=60)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception:
+                import urllib.request
+                import urllib.error
+
+                req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    b = r.read()
+                    data = json.loads(b.decode("utf-8"))
+
+            # DeepSeek (OpenAI-style) response
+            raw = None
+            try:
+                choices = data.get("choices", []) if isinstance(data, dict) else []
+                if choices:
+                    msg = choices[0].get("message", {})
+                    raw = msg.get("content")
+                    # Some DeepSeek variants include 'reasoning_content'
+                    if not raw and "reasoning_content" in msg:
+                        raw = msg.get("reasoning_content")
+            except Exception:
+                raw = None
+
+            if raw is None:
+                raw = str(data)
+
+            cleaned = _strip_think_tags(raw)
+            code = _extract_code_block(cleaned)
+            code = _extract_phi_from_text(code if code else cleaned)
+            if debug:
+                print("=" * 80, flush=True)
+                print(code, flush=True)
+                print("=" * 80, flush=True)
+            out.append(code)
+        except Exception as e:
+            if debug:
+                print(f"[HeuristicFinder] DeepSeek call failed at sample {i}: {e}", flush=True)
+            continue
+    return out
+
+
+def generate_candidates(
+    prompt: str,
+    n: int = 1,
+    debug: bool = False,
+    ollama_model: Optional[str] = None,
+    api_model: Optional[str] = None,
+) -> List[str]:
+    """Unified LLM generation: prefer Ollama if a model is provided, otherwise DeepSeek API.
+
+    - If `ollama_model` is not None, uses local Ollama.
+    - Else, uses DeepSeek API with env `DEEPSEEK_API_KEY`.
+    """
+    if ollama_model:
+        try:
+            return generate_candidates_via_ollama(ollama_model, prompt, n=n, debug=debug)
+        except Exception:
+            if debug:
+                print("[HeuristicFinder] Ollama path failed; falling back to DeepSeek API.", flush=True)
+            # fall through to DeepSeek
+    return generate_candidates_via_deepseek(prompt, n=n, model=api_model, debug=debug)
 
 
 # --- EoH-style prompts/operators (Ollama-only) ---
@@ -328,37 +440,37 @@ def _prompt_m3(parent: Dict[str, str], env_name: str = "tsp") -> str:
     )
 
 
-def eoh_llm_e1(model: str, parents: List[Dict[str, str]], n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
+def eoh_llm_e1(model: Optional[str], parents: List[Dict[str, str]], n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
     prompt = _prompt_e1(parents, env_name)
-    return generate_candidates_via_ollama(model, prompt, n=n, debug=debug)
+    return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
-def eoh_llm_e2(model: str, parents: List[Dict[str, str]], n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
+def eoh_llm_e2(model: Optional[str], parents: List[Dict[str, str]], n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
     prompt = _prompt_e2(parents, env_name)
-    return generate_candidates_via_ollama(model, prompt, n=n, debug=debug)
+    return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
-def eoh_llm_i1(model: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
+def eoh_llm_i1(model: Optional[str], n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
     prompt = _prompt_i1(env_name)
-    return generate_candidates_via_ollama(model, prompt, n=n, debug=debug)
+    return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
-def eoh_llm_m1(model: str, parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
+def eoh_llm_m1(model: Optional[str], parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
     parent = {"algorithm": "(no description)", "code": parent_code}
     prompt = _prompt_m1(parent, env_name)
-    return generate_candidates_via_ollama(model, prompt, n=n, debug=debug)
+    return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
-def eoh_llm_m2(model: str, parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
+def eoh_llm_m2(model: Optional[str], parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
     parent = {"algorithm": "(no description)", "code": parent_code}
     prompt = _prompt_m2(parent, env_name)
-    return generate_candidates_via_ollama(model, prompt, n=n, debug=debug)
+    return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
-def eoh_llm_m3(model: str, parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
+def eoh_llm_m3(model: Optional[str], parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
     parent = {"code": parent_code}
     prompt = _prompt_m3(parent, env_name)
-    return generate_candidates_via_ollama(model, prompt, n=n, debug=debug)
+    return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 def build_eoh_prompt(
     operator: str,
     env_name: str,

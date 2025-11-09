@@ -91,8 +91,7 @@ def propose_offspring(parents: List[Candidate], cfg: EvoConfig) -> List[Candidat
     offspring: List[Candidate] = []
 
     if not cfg.ollama_model:
-        print("[HeuristicFinder] Missing --ollama-model; cannot propose offspring.", flush=True)
-        return offspring
+        print("[HeuristicFinder] No --ollama-model provided; using DeepSeek API fallback.", flush=True)
 
     # Helper to build a small parent pack with 'p' first for diversity
     def build_pack(p: Candidate, all_parents: List[Candidate], k_ctx: int = 3):
@@ -150,14 +149,12 @@ def propose_offspring(parents: List[Candidate], cfg: EvoConfig) -> List[Candidat
 
 
 def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
-    # init population via LLM i1 (EoH style)
-    if not cfg.ollama_model:
-        raise RuntimeError("--ollama-model is required for LLM-based initialization.")
+    # init population via LLM i1 (EoH style) using Ollama if provided, otherwise DeepSeek API
     init_codes = eoh_llm_i1(cfg.ollama_model, n=cfg.population_size, env_name="tsp", debug=False)
     specs = compile_candidates(init_codes)
     if not specs:
         print(init_codes)
-        raise RuntimeError("LLM produced no valid initial candidates. Check Ollama and model.")
+        raise RuntimeError("LLM produced no valid initial candidates. Check provider, API key, and model.")
 
     def _init_gamma() -> float:
         if cfg.pbrs_gamma_choices and len(cfg.pbrs_gamma_choices) > 0:
@@ -381,4 +378,3 @@ def _dump_candidates(dump_dir: str, results: List[Tuple[Candidate, float]], gen_
                 f.write(cand.spec.code)
         except Exception:
             pass
-

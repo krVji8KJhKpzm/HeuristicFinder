@@ -7,8 +7,12 @@ Steps:
 3) (Optional) Kick off full training using Hydra run.py with the saved potential
 
 Example:
+  # Use local Ollama (preferred when available)
   python examples/auto_find_phi_tsp20.py --ollama-model qwen3:32b --population-size 6 --iterations 3 --train-after \
       --train-epochs 100 --gpus 1 --batch-size 512
+
+  # Or, omit --ollama-model to use DeepSeek API (set DEEPSEEK_API_KEY)
+  DEEPSEEK_API_KEY=sk-... python examples/auto_find_phi_tsp20.py --population-size 6 --iterations 3
 """
 
 from __future__ import annotations
@@ -76,9 +80,7 @@ def main():
     # parse gamma list
     gamma_choices = [float(x) for x in args.gamma_choices.split(",") if x.strip() != ""] if args.gamma_choices else []
 
-    # Require an Ollama model for LLM-driven evolution
-    if not args.ollama_model:
-        raise SystemExit("--ollama-model is required for EoH evolution via Ollama.")
+    # If no Ollama model, evolution falls back to DeepSeek API using DEEPSEEK_API_KEY
 
     cfg = EvoConfig(
         population_size=args.population_size,
