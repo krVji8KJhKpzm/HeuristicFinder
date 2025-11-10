@@ -16,8 +16,15 @@ from rl4co.heuristic_finder.llm import (
     eoh_llm_m1,
     eoh_llm_m2,
     eoh_llm_m3,
+    eoh_llm_mutate,
+    eoh_llm_crossover,
 )
 from rl4co.heuristic_finder.potential import PotentialSpec, compile_potential
+from rl4co.heuristic_finder.diagnostics import (
+    profile_phi_on_tsp,
+    summarize_profile_for_prompt,
+    save_profile_json,
+)
 
 
 @dataclass
@@ -58,6 +65,16 @@ class EvoConfig:
     norm_dphi: bool = False
     # Penalize candidates whose estimated tour length exceeds this threshold
     objective_bad_threshold: float = 5.0
+    # Selection controls
+    include_parents: bool = True  # (mu + lambda) selection; parents compete with offspring
+    offspring_factor: int = 6  # keep top (offspring_factor * N) offspring before selection
+    # Optional: run diagnostics and feed summary to LLM prompts
+    diag_for_llm: bool = False
+    diag_num_loc: Optional[List[int]] = None  # e.g., [20, 50]
+    diag_batches_per_n: int = 2
+    diag_batch_size: int = 128
+    diag_gamma: float = 1.0
+    diag_device: Optional[str] = None  # default to cfg.device
 
 
 def compile_candidates(codes: List[str]) -> List[PotentialSpec]:
@@ -86,7 +103,11 @@ def _mutate_gamma(parent_gamma: float, cfg: EvoConfig) -> float:
     return max(min(g, 2.0), -2.0)
 
 
-def propose_offspring(parents: List[Candidate], cfg: EvoConfig) -> List[Candidate]:
+def propose_offspring(
+    parents: List[Candidate],
+    cfg: EvoConfig,
+    eval_summaries: Optional[dict] = None,
+) -> List[Candidate]:
     """Generate offspring using EoH ops on code, and mutate gamma as part of genome."""
     offspring: List[Candidate] = []
 
@@ -101,6 +122,10 @@ def propose_offspring(parents: List[Candidate], cfg: EvoConfig) -> List[Candidat
         return [{"algorithm": "(no description)", "code": sp.spec.code} for sp in ordered]
 
     for p in parents:
+        # Retrieve optional eval summary for this parent
+        p_summary = None
+        if eval_summaries is not None:
+            p_summary = eval_summaries.get(p.spec.code)
         try:
             # e1
             pack = build_pack(p, parents, k_ctx=3)
@@ -138,6 +163,45 @@ def propose_offspring(parents: List[Candidate], cfg: EvoConfig) -> List[Candidat
                 offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
         except Exception:
             pass
+
+        # Reflection-guided mutate/crossover using eval summary (if provided)
+        if p_summary:
+            try:
+                # mutate with eval summary
+                codes = eoh_llm_mutate(
+                    model=cfg.ollama_model or "",
+                    parent_code=p.spec.code,
+                    env_name="tsp",
+                    guidance="Prefer low-variance, N-invariant features; normalize by graph_scale; avoid heavy branching.",
+                    eval_summary=p_summary,
+                    n=1,
+                    debug=True,
+                )
+                for sp in compile_candidates(codes):
+                    offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
+            except Exception:
+                pass
+            try:
+                # crossover with a random other parent + merged summaries
+                pool = [q for q in parents if q is not p]
+                if pool:
+                    q = random.choice(pool)
+                    q_summary = eval_summaries.get(q.spec.code, "") if eval_summaries else ""
+                    merged_summary = f"Parent A summary:\n{p_summary}\nParent B summary:\n{q_summary}"
+                    codes = eoh_llm_crossover(
+                        model=cfg.ollama_model or "",
+                        parent_a=p.spec.code,
+                        parent_b=q.spec.code,
+                        env_name="tsp",
+                        guidance="Blend complementary, stable cues; keep output scale moderate; ensure broadcastability [B,1].",
+                        eval_summary=merged_summary,
+                        n=1,
+                        debug=True,
+                    )
+                    for sp in compile_candidates(codes):
+                        offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
+            except Exception:
+                pass
 
         # gamma-only mutation (keep code)
         try:
@@ -179,20 +243,61 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
         scored.sort(key=lambda x: x[1], reverse=True)
         parents = [s for s, _ in scored[: cfg.population_size]]
 
-        # propose offspring: target ~5N (one e1/e2/m1/m2/m3 per parent)
-        offspring = propose_offspring(parents, cfg)
+        # Optional: diagnostics for each parent and summary to feed LLM
+        eval_summaries = None
+        if cfg.diag_for_llm:
+            eval_summaries = {}
+            # prepare diagnostics params
+            sizes = cfg.diag_num_loc if (cfg.diag_num_loc and len(cfg.diag_num_loc) > 0) else [20, 50]
+            for pi, p in enumerate(parents):
+                try:
+                    prof = profile_phi_on_tsp(
+                        p.spec,
+                        num_loc_list=sizes,
+                        batches_per_n=cfg.diag_batches_per_n,
+                        batch_size=cfg.diag_batch_size,
+                        device=cfg.diag_device or cfg.device,
+                        seed=cfg.seed,
+                        gamma=cfg.diag_gamma,
+                    )
+                    summary = summarize_profile_for_prompt(prof)
+                    eval_summaries[p.spec.code] = summary
+                    if cfg.dump_dir:
+                        os.makedirs(cfg.dump_dir, exist_ok=True)
+                        fname = f"gen{gen_idx:02d}_parent{pi:03d}_diag.json"
+                        save_profile_json(prof, os.path.join(cfg.dump_dir, fname))
+                except Exception:
+                    continue
+
+        # propose offspring: baseline ops + (optional) reflection-guided ops
+        offspring = propose_offspring(parents, cfg, eval_summaries=eval_summaries)
 
         # evaluate offspring (possibly parallel)
         off_results = _evaluate_population(offspring, cfg)
         if cfg.dump_dir:
             _dump_candidates(cfg.dump_dir, off_results, gen_idx=gen_idx + 1)
 
-        # select next generation strictly from offspring to size N
-        if cfg.novelty_weight > 0 and off_results:
-            scored = _rank_with_novelty(off_results, archive, cfg.novelty_weight)[: cfg.population_size]
+        # Optionally keep only top-K offspring before combining with parents
+        if off_results:
+            if cfg.novelty_weight > 0:
+                ranked_off = _rank_with_novelty(off_results, archive, cfg.novelty_weight)
+            else:
+                ranked_off = sorted(off_results, key=lambda x: x[1], reverse=True)
+            k_off = max(cfg.population_size * max(1, int(cfg.offspring_factor)), cfg.population_size)
+            ranked_off = ranked_off[: k_off]
         else:
-            off_results.sort(key=lambda x: x[1], reverse=True)
-            scored = off_results[: cfg.population_size]
+            ranked_off = []
+
+        # (mu + lambda) selection: combine parents and offspring, then select top-N
+        combined = list(ranked_off)
+        if cfg.include_parents and scored:
+            combined.extend(scored)
+
+        if cfg.novelty_weight > 0 and combined:
+            next_scored = _rank_with_novelty(combined, archive, cfg.novelty_weight)[: cfg.population_size]
+        else:
+            next_scored = sorted(combined, key=lambda x: x[1], reverse=True)[: cfg.population_size]
+        scored = next_scored
 
         # update novelty archive with current best of new generation
         if scored:

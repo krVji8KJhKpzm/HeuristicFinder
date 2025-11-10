@@ -15,21 +15,21 @@ def format_prompt(env_name: str = "tsp", guidance: str = "") -> str:
         "- The code must define exactly one function: def phi(state): and nothing else.\n"
         "- Use only torch ops; no prints, no explanations, no comments outside code.\n"
         "- Ensure result is broadcastable to [B,1]; handle NaNs via torch.nan_to_num.\n"
-        "Goal: robust, node-count-invariant heuristics (avoid dependence on N).\n"
-        "Available state helpers (all batch-friendly):\n"
-        "- current_loc() -> [B,2]; start_loc() -> [B,2]\n"
-        "- unvisited_locs() -> [B,N,2] with NaNs at visited\n"
-        "- num_remaining() -> [B]; remaining_ratio() -> [B,1]; visited_ratio() -> [B,1]; step_ratio() -> [B,1]\n"
-        "- graph_scale() -> [B,1] (bbox diag, use to normalize distances); graph_aspect_ratio() -> [B,1] (dx/dy)\n"
-        "- distances_to_unvisited(normalize=True) -> [B,N] (NaN at visited)\n"
-        "- nearest_unvisited_distance(normalize=True) -> [B,1]\n"
-        "- k_nearest_unvisited(k=3, normalize=True) -> [B,k]; k_farthest_unvisited(k=3, normalize=True) -> [B,k]\n"
-        "- centroid_unvisited() -> [B,2]; vector_to_centroid() -> [B,2]; distance_to_centroid(normalize=True) -> [B,1]\n"
-        "- distance_to_start(normalize=True) -> [B,1]; mean_unvisited_distance(normalize=True) -> [B,1]; max_unvisited_distance(normalize=True) -> [B,1]; std_unvisited_distance(normalize=True) -> [B,1]\n"
+        "Goal: robust, node-count-invariant outputs. Use reductions (mean/max/min/std/softmin) over N-dependent tensors.\n"
+        "Avoid Python loops; prefer vectorized torch ops.\n"
+        "Available state helpers (batch-friendly):\n"
+        "Raw N-dependent (use with reductions): action_mask() -> [B,N] (True=unvisited); visited_mask() -> [B,N];\n"
+        "  current_node_index() -> [B]; first_node_index() -> [B]; distances_from_current(normalize=True) -> [B,N];\n"
+        "  distance_matrix(normalize=True) -> [B,N,N] (diag=0).\n"
         "Return a tensor broadcastable to [B,1]. Keep it simple and stable.\n"
         + guidance
     )
 
+# "Progress scalars: remaining_ratio() -> [B,1]; visited_ratio() -> [B,1]; step_ratio() -> [B,1]\n"
+# "Geometry (fixed-size): graph_scale() -> [B,1]; current_loc() -> [B,2]; start_loc() -> [B,2];\n"
+# "  nearest_unvisited_distance(normalize=True) -> [B,1]; k_nearest_unvisited(k=3) -> [B,k]; k_farthest_unvisited(k=3) -> [B,k];\n"
+# "  centroid_unvisited() -> [B,2]; distance_to_centroid(normalize=True) -> [B,1]; distance_to_start(normalize=True) -> [B,1];\n"
+# "  mean_unvisited_distance(normalize=True) -> [B,1]; max_unvisited_distance(normalize=True) -> [B,1]; std_unvisited_distance(normalize=True) -> [B,1]\n"
 
 def _strip_think_tags(text: str) -> str:
     """Remove '<think> ... </think>' blocks that some models emit."""
@@ -508,20 +508,19 @@ def _phi_prompt_parts(env_name: str = "tsp") -> Dict[str, object]:
     func_outputs = ["value"]
     inout_inf = (
         "Input 'state' offers helper methods (batch-friendly):\n"
-        "- current_loc() -> [B,2]; start_loc() -> [B,2]\n"
-        "- unvisited_locs() -> [B,N,2] with NaNs at visited\n"
-        "- num_remaining() -> [B]; remaining_ratio() -> [B,1]; visited_ratio() -> [B,1]; step_ratio() -> [B,1]\n"
-        "- graph_scale() -> [B,1] (bounding-box diagonal) for normalization\n"
-        "- distances_to_unvisited(normalize=True) -> [B,N] (NaN at visited)\n"
-        "- nearest_unvisited_distance(normalize=True) -> [B,1]\n"
-        "- k_nearest_unvisited(k=3, normalize=True) -> [B,k]; k_farthest_unvisited(k=3, normalize=True) -> [B,k]\n"
-        "- centroid_unvisited() -> [B,2]; vector_to_centroid() -> [B,2]; distance_to_centroid(normalize=True) -> [B,1]\n"
-        "- distance_to_start(normalize=True) -> [B,1]"
+        "Progress: remaining_ratio() -> [B,1]; visited_ratio() -> [B,1]; step_ratio() -> [B,1]\n"
+        "Geometry: graph_scale() -> [B,1]; current_loc() -> [B,2]; start_loc() -> [B,2];\n"
+        "  nearest_unvisited_distance(normalize=True) -> [B,1]; k_nearest_unvisited(k=3) -> [B,k]; k_farthest_unvisited(k=3) -> [B,k];\n"
+        "  centroid_unvisited() -> [B,2]; distance_to_centroid(normalize=True) -> [B,1]; distance_to_start(normalize=True) -> [B,1];\n"
+        "  mean_unvisited_distance(normalize=True) -> [B,1]; max_unvisited_distance(normalize=True) -> [B,1]; std_unvisited_distance(normalize=True) -> [B,1]\n"
+        "Raw N-dependent (reduce over them): action_mask() -> [B,N] (True=unvisited); visited_mask() -> [B,N];\n"
+        "  current_node_index() -> [B]; first_node_index() -> [B]; distances_from_current(normalize=True) -> [B,N];\n"
+        "  distance_matrix(normalize=True) -> [B,N,N] (diag=0)."
     )
     other_inf = (
-        "Constraints: Use only torch ops; do not import; be node-count-invariant;"
-        " normalize by graph_scale() when using distances; ensure outputs are finite"
-        " and reasonably scaled; return ONLY the Python function without any extra text."
+        "Constraints: Use only torch ops; do not import; ensure node-count-invariant outputs by reducing over N-dependent tensors;"
+        " normalize distances by graph_scale(); avoid Python loops; ensure outputs are finite and reasonably scaled;"
+        " return ONLY the Python function without any extra text."
     )
     return {
         "task": task,

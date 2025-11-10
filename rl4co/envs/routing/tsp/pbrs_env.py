@@ -42,6 +42,12 @@ class TSPStateView:
         n = float(self.num_nodes())
         return (self.i.float() / n)
 
+    def visited_ratio(self) -> torch.Tensor:
+        """Fraction of nodes already visited in [0,1], shape [batch, 1]."""
+        n = float(self.num_nodes())
+        visited = (~self.action_mask).sum(dim=-1).float()
+        return (visited / n).unsqueeze(-1)
+
     def current_loc(self) -> torch.Tensor:
         return gather_by_index(self.locs, self.current_node)  # [batch, 2]
 
@@ -54,6 +60,22 @@ class TSPStateView:
         # NaN-out visited nodes for convenience
         masked = torch.where(mask.unsqueeze(-1), self.locs, torch.nan)
         return masked  # [batch, N, 2] with NaNs for visited
+
+    def visited_mask(self) -> torch.Tensor:
+        """Boolean mask of visited nodes [batch, N]."""
+        return ~self.action_mask
+
+    def unvisited_mask(self) -> torch.Tensor:
+        """Boolean mask of unvisited nodes [batch, N] (alias of action_mask)."""
+        return self.action_mask
+
+    def current_node_index(self) -> torch.Tensor:
+        """Index of current node [batch]."""
+        return self.current_node
+
+    def first_node_index(self) -> torch.Tensor:
+        """Index of first node [batch]."""
+        return self.first_node
 
     # -------- Node-count-invariant helpers (fixed-size scalars/vectors) --------
     def graph_scale(self) -> torch.Tensor:
@@ -78,6 +100,30 @@ class TSPStateView:
             d = d / self.graph_scale()
         # NaN-out visited
         d = torch.where(self.action_mask, d, torch.nan)
+        return d
+
+    def distances_from_current(self, normalize: bool = True) -> torch.Tensor:
+        """Distances from current node to all nodes [batch, N] (no NaNs)."""
+        cur = self.current_loc()  # [B,2]
+        dif = self.locs - cur.unsqueeze(1)  # [B,N,2]
+        d = torch.linalg.norm(dif, dim=-1, ord=2)  # [B,N]
+        if normalize:
+            d = d / self.graph_scale()
+        return d
+
+    def distance_matrix(self, normalize: bool = True) -> torch.Tensor:
+        """Full pairwise distance matrix [batch, N, N]. Diagonal is 0.
+
+        When `normalize=True`, divide by `graph_scale()` per instance.
+        """
+        locs = self.locs  # [B,N,2]
+        dif = locs.unsqueeze(-3) - locs.unsqueeze(-2)  # [B,N,N,2]
+        d = torch.linalg.norm(dif, dim=-1, ord=2)  # [B,N,N]
+        if normalize:
+            d = d / self.graph_scale().unsqueeze(-1)  # [B,1] -> [B,1,1]
+        # ensure exact zeros on diagonal (numerical stability)
+        ii = torch.arange(locs.shape[-2], device=locs.device)
+        d[..., ii, ii] = 0.0
         return d
 
     def nearest_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
@@ -267,9 +313,12 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
 
 class InvariantTSPStateView:
     """
-    Restricted state view exposing only node-count-invariant helpers to potential functions.
+    Restricted state view exposing helpers to potential functions.
 
-    Methods mirror a subset of TSPStateView that return fixed-size tensors independent of N.
+    Primary goal is to encourage node-count-invariant designs; however, it also
+    exposes some raw N-dependent features (e.g., masks and distance matrix) for
+    expert aggregation. Ensure the final output remains broadcastable to [B,1]
+    and numerically stable.
     """
 
     def __init__(self, base: TSPStateView):
@@ -322,3 +371,25 @@ class InvariantTSPStateView:
 
     def start_loc(self) -> torch.Tensor:
         return self._base.start_loc()
+
+    # Raw N-dependent helpers (use with reductions to keep invariance)
+    def action_mask(self) -> torch.Tensor:
+        return self._base.action_mask
+
+    def unvisited_mask(self) -> torch.Tensor:
+        return self._base.unvisited_mask()
+
+    def visited_mask(self) -> torch.Tensor:
+        return self._base.visited_mask()
+
+    def current_node_index(self) -> torch.Tensor:
+        return self._base.current_node_index()
+
+    def first_node_index(self) -> torch.Tensor:
+        return self._base.first_node_index()
+
+    def distances_from_current(self, normalize: bool = True) -> torch.Tensor:
+        return self._base.distances_from_current(normalize=normalize)
+
+    def distance_matrix(self, normalize: bool = True) -> torch.Tensor:
+        return self._base.distance_matrix(normalize=normalize)
