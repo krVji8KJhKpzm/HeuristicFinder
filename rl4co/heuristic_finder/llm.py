@@ -104,6 +104,22 @@ def _build_repair_instruction(raw: str) -> str:
     )
 
 
+def _reasoner_context(env_name: str = "tsp") -> str:
+    """Build a neutral, spec-only context for the reasoner stage without code-only directives."""
+    parts = _phi_prompt_parts(env_name)
+    goal = (
+        "Design a potential function Phi(state) for PBRS in the given environment.\n"
+        "Constraints: node-count-invariant, use normalized distances, output broadcastable to [B,1],\n"
+        "handle NaNs with torch.nan_to_num, and prefer simple/stable formulations.\n"
+    )
+    ctx = (
+        goal
+        + "Available state helpers (batch-friendly):\n"
+        + parts["inout_inf"]
+    )
+    return ctx
+
+
 def generate_candidates_via_ollama(
     model: str, prompt: str, n: int = 1, debug: bool = False
 ) -> List[str]:
@@ -400,7 +416,8 @@ def two_stage_generate_candidates(
     - Stage 2 (code): uses local Ollama model (e.g., qwen3:32b). If Ollama not available, falls back to DeepSeek chat.
     """
     # Stage 1: reasoner spec
-    spec_msgs_prompt = _reasoner_spec_prompt(prompt)
+    spec_ctx = _reasoner_context(env_name)
+    spec_msgs_prompt = _reasoner_spec_prompt(spec_ctx)
     # Force reasoner model default
     rm = reasoner_model or os.environ.get("DEEPSEEK_REASONER_MODEL", None) or os.environ.get("DEEPSEEK_MODEL", "deepseek-reasoner")
     json_sys_prompt = (
@@ -638,6 +655,8 @@ def _prompt_m3(parent: Dict[str, str], env_name: str = "tsp") -> str:
 
 def eoh_llm_e1(model: Optional[str], parents: List[Dict[str, str]], n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
     prompt = _prompt_e1(parents, env_name)
+    # allow env to force debug
+    debug = debug or os.environ.get("LLM_DEBUG", "").lower() in ("1", "true", "yes")
     if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):  # reasoner -> coder(Qwen)
         return two_stage_generate_candidates(prompt, n=n, env_name=env_name, debug=debug, coder_ollama_model=model)
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
@@ -645,6 +664,7 @@ def eoh_llm_e1(model: Optional[str], parents: List[Dict[str, str]], n: int = 1, 
 
 def eoh_llm_e2(model: Optional[str], parents: List[Dict[str, str]], n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
     prompt = _prompt_e2(parents, env_name)
+    debug = debug or os.environ.get("LLM_DEBUG", "").lower() in ("1", "true", "yes")
     if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):
         return two_stage_generate_candidates(prompt, n=n, env_name=env_name, debug=debug, coder_ollama_model=model)
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
@@ -652,6 +672,7 @@ def eoh_llm_e2(model: Optional[str], parents: List[Dict[str, str]], n: int = 1, 
 
 def eoh_llm_i1(model: Optional[str], n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
     prompt = _prompt_i1(env_name)
+    debug = debug or os.environ.get("LLM_DEBUG", "").lower() in ("1", "true", "yes")
     if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):
         return two_stage_generate_candidates(prompt, n=n, env_name=env_name, debug=debug, coder_ollama_model=model)
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
@@ -660,6 +681,7 @@ def eoh_llm_i1(model: Optional[str], n: int = 1, env_name: str = "tsp", debug: b
 def eoh_llm_m1(model: Optional[str], parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
     parent = {"algorithm": "(no description)", "code": parent_code}
     prompt = _prompt_m1(parent, env_name)
+    debug = debug or os.environ.get("LLM_DEBUG", "").lower() in ("1", "true", "yes")
     if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):
         return two_stage_generate_candidates(prompt, n=n, env_name=env_name, debug=debug, coder_ollama_model=model)
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
@@ -668,6 +690,7 @@ def eoh_llm_m1(model: Optional[str], parent_code: str, n: int = 1, env_name: str
 def eoh_llm_m2(model: Optional[str], parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
     parent = {"algorithm": "(no description)", "code": parent_code}
     prompt = _prompt_m2(parent, env_name)
+    debug = debug or os.environ.get("LLM_DEBUG", "").lower() in ("1", "true", "yes")
     if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):
         return two_stage_generate_candidates(prompt, n=n, env_name=env_name, debug=debug, coder_ollama_model=model)
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)

@@ -115,6 +115,10 @@ def main():
     save_path = os.path.abspath(args.save_path)
     with open(save_path, "w", encoding="utf-8") as f:
         f.write(best_cand.spec.code)
+    # In our fitness, higher reward is better and equals negative tour length
+    est_tour_len = -float(best_score)
+    print(f"Saved best phi to: {save_path}")
+    print(f"Estimated tour length (from val/reward): {est_tour_len:.4f}")
     print("=== Top Candidates ===")
     for cand, score in results[: args.topk]:
         print(f"{cand.spec.name} [gamma={cand.gamma:+.3f}]: val/reward={score:.4f}")
