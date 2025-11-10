@@ -67,7 +67,7 @@ class EvoConfig:
     center_dphi: bool = False
     norm_dphi: bool = False
     # Penalize candidates whose estimated tour length exceeds this threshold
-    objective_bad_threshold: float = 5.0
+    objective_bad_threshold: float = 50.0
     # EoH-init: create this many x N seeds via i1
     initial_copies: int = 2
     # Keep gamma fixed by default to match EoH (no hyper evolution)
