@@ -3,6 +3,7 @@
 from typing import List, Optional, Dict
 import os
 import json
+import time
 
 
 def format_prompt(env_name: str = "tsp", guidance: str = "") -> str:
@@ -83,6 +84,26 @@ def _extract_phi_from_text(text: str) -> str:
     except Exception:
         pass
     return text
+
+
+def _maybe_dump(kind: str, content: str, suffix: str = ".txt") -> None:
+    """Optionally dump LLM I/O to disk for debugging.
+
+    Set env var `LLM_DUMP_DIR` to a directory path to enable.
+    Files are named as `<timestamp>_<kind><suffix>`.
+    """
+    dump_dir = os.environ.get("LLM_DUMP_DIR")
+    if not dump_dir:
+        return
+    try:
+        os.makedirs(dump_dir, exist_ok=True)
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(dump_dir, f"{ts}_{kind}{suffix}")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content if isinstance(content, str) else str(content))
+    except Exception:
+        # best-effort only
+        pass
 
 
 def _looks_like_phi(code: Optional[str]) -> bool:
