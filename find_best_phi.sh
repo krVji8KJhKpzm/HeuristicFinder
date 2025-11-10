@@ -13,8 +13,10 @@ CUDA_VISIBLE_DEVICES=7 nohup ollama serve > ollama.log 2>&1 &
 sleep 3 || true
 
 # 2) Run evolutionary search with short-training fitness on GPUs 0,1,2,3
-#    The search process will see all GPUs; internally it will assign each candidate to one GPU.
-echo "[INFO] Launching auto_find_phi_tsp20 (logs: find_best_phi.log)" | tee -a setup.log
+#    Optionally accept a node count as first arg (default 50)
+NUM_LOC="${1:-50}"
+export TSP_NUM_LOC="${NUM_LOC}"
+echo "[INFO] Launching auto_find_phi (N=${NUM_LOC}) (logs: find_best_phi.log)" | tee -a setup.log
 # PBRS search tuning (override via env):
 #   GAMMA_CHOICES: comma list of gamma values to try per candidate
 #   REWARD_SCALE:  None|scale|norm (advantage scaling)

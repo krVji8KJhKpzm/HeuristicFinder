@@ -1,5 +1,5 @@
-﻿"""
-End-to-end pipeline to automatically search for the best Phi(s) on TSP-20 and optionally start full training.
+"""
+End-to-end pipeline to automatically search for the best Phi(s) on TSP-50 and optionally start full training.
 
 Steps:
 1) Evolutionary search with short POMOPBRS training as fitness
@@ -142,3 +142,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

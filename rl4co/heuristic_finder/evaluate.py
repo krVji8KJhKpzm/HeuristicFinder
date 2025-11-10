@@ -55,7 +55,9 @@ def evaluate_phi_on_tsp20(
     Note: this does not train the policy; it provides quick diagnostics about the shaped signal.
     """
     # Base env for policy action generation
-    gen = TSPGenerator(num_loc=20)
+    # Switch evaluation to TSP-50
+    num_loc = int(os.environ.get("TSP_NUM_LOC", "50"))
+    gen = TSPGenerator(num_loc=num_loc)
     base_env = TSPEnv(generator=gen)
 
     # Sample batch
@@ -117,7 +119,9 @@ def train_fitness_phi_on_tsp20(
     if norm_dphi:
         os.environ["PBRS_NORM_DPHI"] = "1"
 
-    gen = TSPGenerator(num_loc=20)
+    # Switch fitness short-training to TSP-50
+    num_loc = int(os.environ.get("TSP_NUM_LOC", "50"))
+    gen = TSPGenerator(num_loc=num_loc)
     env = TSPEnv(generator=gen, seed=seed)
 
     model = POMOPBRS(

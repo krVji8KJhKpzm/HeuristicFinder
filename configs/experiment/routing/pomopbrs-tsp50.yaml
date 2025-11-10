@@ -14,7 +14,7 @@ env:
 
 logger:
   csv:
-    name: pomopbrs-tsp20
+    name: pomopbrs-tsp50
 
 trainer:
   max_epochs: 100
