@@ -104,7 +104,7 @@ def propose_offspring(parents: List[Candidate], cfg: EvoConfig) -> List[Candidat
         try:
             # e1
             pack = build_pack(p, parents, k_ctx=3)
-            codes = eoh_llm_e1(cfg.ollama_model, pack, n=1, env_name="tsp", debug=False)
+            codes = eoh_llm_e1(cfg.ollama_model, pack, n=1, env_name="tsp", debug=True)
             for sp in compile_candidates(codes):
                 offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
         except Exception:
@@ -112,28 +112,28 @@ def propose_offspring(parents: List[Candidate], cfg: EvoConfig) -> List[Candidat
         try:
             # e2
             pack = build_pack(p, parents, k_ctx=3)
-            codes = eoh_llm_e2(cfg.ollama_model, pack, n=1, env_name="tsp", debug=False)
+            codes = eoh_llm_e2(cfg.ollama_model, pack, n=1, env_name="tsp", debug=True)
             for sp in compile_candidates(codes):
                 offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
         except Exception:
             pass
         try:
             # m1
-            codes = eoh_llm_m1(cfg.ollama_model, p.spec.code, n=1, env_name="tsp", debug=False)
+            codes = eoh_llm_m1(cfg.ollama_model, p.spec.code, n=1, env_name="tsp", debug=True)
             for sp in compile_candidates(codes):
                 offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
         except Exception:
             pass
         try:
             # m2
-            codes = eoh_llm_m2(cfg.ollama_model, p.spec.code, n=1, env_name="tsp", debug=False)
+            codes = eoh_llm_m2(cfg.ollama_model, p.spec.code, n=1, env_name="tsp", debug=True)
             for sp in compile_candidates(codes):
                 offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
         except Exception:
             pass
         try:
             # m3
-            codes = eoh_llm_m3(cfg.ollama_model, p.spec.code, n=1, env_name="tsp", debug=False)
+            codes = eoh_llm_m3(cfg.ollama_model, p.spec.code, n=1, env_name="tsp", debug=True)
             for sp in compile_candidates(codes):
                 offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
         except Exception:

@@ -124,7 +124,7 @@ def main():
         print(f"{cand.spec.name} [gamma={cand.gamma:+.3f}]: val/reward={score:.4f}")
     # 3) Optional: Start full training via run.py (Hydra)
     if args.train_after:
-        cmd: List[str] = ["python", "run.py", "experiment=routing/pomopbrs-tsp20.yaml"]
+        cmd: List[str] = ["python", "run.py", "experiment=routing/pomopbrs-tsp50.yaml"]
         cmd.append(f"model.potential=file:{save_path}")
         cmd.append(f"trainer.max_epochs={args.train_epochs}")
         cmd.append(f"model.batch_size={args.train_batch_size}")

@@ -251,13 +251,13 @@ def generate_candidates_via_deepseek(
 
     # Allow env overrides for generation parameters
     try:
-        temperature = float(os.environ.get("DEEPSEEK_TEMPERATURE", "0.3"))
+        temperature = float(os.environ.get("DEEPSEEK_TEMPERATURE", "0.0"))
     except Exception:
-        temperature = 0.3
+        temperature = 0.0
     try:
         max_tokens = int(os.environ.get("DEEPSEEK_MAX_TOKENS", "1024"))
     except Exception:
-        max_tokens = 1024
+        max_tokens = 32768
 
     payload = {
         "model": model_name,

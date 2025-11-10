@@ -57,27 +57,27 @@ nohup python run.py \
   > train_pbrs.log 2>&1 &
 
 # 2) Baseline POMO full training with original reward (same budgets)
-echo "[INFO] Starting POMO baseline full training... (train_baseline.log)"
-nohup python run.py \
-  experiment=routing/pomo.yaml \
-  callbacks=print_val_objective.yaml \
-  env.generator_params.num_loc=20 \
-  +trainer.enable_progress_bar=false \
-  trainer.accelerator=gpu \
-  trainer.devices=${NUM_DEVICES} \
-  trainer.max_epochs=${EPOCHS} \
-  model.batch_size=${BATCH} \
-  model.train_data_size=${TRAIN_SIZE} \
-  model.val_data_size=${VAL_SIZE} \
-  model.test_data_size=${TEST_SIZE} \
-  model.optimizer_kwargs.lr=${LR} \
-  model.optimizer_kwargs.weight_decay=1e-6 \
-  model.lr_scheduler="MultiStepLR" \
-  model.lr_scheduler_kwargs.milestones=[80,95] \
-  model.lr_scheduler_kwargs.gamma=0.1 \
-  model.num_starts=null \
-  seed=${SEED} \
-  logger=csv logger.csv.name=pomo-tsp20 \
-  > train_baseline.log 2>&1 &
+# echo "[INFO] Starting POMO baseline full training... (train_baseline.log)"
+# nohup python run.py \
+#   experiment=routing/pomo.yaml \
+#   callbacks=print_val_objective.yaml \
+#   env.generator_params.num_loc=20 \
+#   +trainer.enable_progress_bar=false \
+#   trainer.accelerator=gpu \
+#   trainer.devices=${NUM_DEVICES} \
+#   trainer.max_epochs=${EPOCHS} \
+#   model.batch_size=${BATCH} \
+#   model.train_data_size=${TRAIN_SIZE} \
+#   model.val_data_size=${VAL_SIZE} \
+#   model.test_data_size=${TEST_SIZE} \
+#   model.optimizer_kwargs.lr=${LR} \
+#   model.optimizer_kwargs.weight_decay=1e-6 \
+#   model.lr_scheduler="MultiStepLR" \
+#   model.lr_scheduler_kwargs.milestones=[80,95] \
+#   model.lr_scheduler_kwargs.gamma=0.1 \
+#   model.num_starts=null \
+#   seed=${SEED} \
+#   logger=csv logger.csv.name=pomo-tsp20 \
+#   > train_baseline.log 2>&1 &
 
 echo "[INFO] Launched. Tail logs:\n  tail -f train_pbrs.log\n  tail -f train_baseline.log"
