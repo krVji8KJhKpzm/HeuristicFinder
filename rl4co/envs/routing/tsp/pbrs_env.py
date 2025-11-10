@@ -78,38 +78,38 @@ class TSPStateView:
         return self.first_node
 
     # -------- Node-count-invariant helpers (fixed-size scalars/vectors) --------
-    def graph_scale(self) -> torch.Tensor:
-        """A global length scale: diagonal of the bounding box per instance [batch, 1]."""
-        # range over nodes for x and y
-        x = self.locs[..., 0]
-        y = self.locs[..., 1]
-        dx = (x.max(dim=-1).values - x.min(dim=-1).values)
-        dy = (y.max(dim=-1).values - y.min(dim=-1).values)
-        scale = torch.sqrt(dx * dx + dy * dy).clamp_min(1e-6).unsqueeze(-1)
-        return scale  # [batch, 1]
+    # def graph_scale(self) -> torch.Tensor:
+    #     """A global length scale: diagonal of the bounding box per instance [batch, 1]."""
+    #     # range over nodes for x and y
+    #     x = self.locs[..., 0]
+    #     y = self.locs[..., 1]
+    #     dx = (x.max(dim=-1).values - x.min(dim=-1).values)
+    #     dy = (y.max(dim=-1).values - y.min(dim=-1).values)
+    #     scale = torch.sqrt(dx * dx + dy * dy).clamp_min(1e-6).unsqueeze(-1)
+    #     return scale  # [batch, 1]
 
-    def distances_to_unvisited(self, normalize: bool = True) -> torch.Tensor:
-        """Distances from current node to all unvisited nodes [batch, N].
+    # def distances_to_unvisited(self, normalize: bool = True) -> torch.Tensor:
+    #     """Distances from current node to all unvisited nodes [batch, N].
 
-        Visited positions are NaN. When `normalize=True`, divide by `graph_scale()`.
-        """
-        cur = self.current_loc()  # [B,2]
-        dif = self.locs - cur.unsqueeze(1)  # [B,N,2]
-        d = torch.linalg.norm(dif, dim=-1, ord=2)  # [B,N]
-        if normalize:
-            d = d / self.graph_scale()
-        # NaN-out visited
-        d = torch.where(self.action_mask, d, torch.nan)
-        return d
+    #     Visited positions are NaN. When `normalize=True`, divide by `graph_scale()`.
+    #     """
+    #     cur = self.current_loc()  # [B,2]
+    #     dif = self.locs - cur.unsqueeze(1)  # [B,N,2]
+    #     d = torch.linalg.norm(dif, dim=-1, ord=2)  # [B,N]
+    #     if normalize:
+    #         d = d / self.graph_scale()
+    #     # NaN-out visited
+    #     d = torch.where(self.action_mask, d, torch.nan)
+    #     return d
 
-    def distances_from_current(self, normalize: bool = True) -> torch.Tensor:
-        """Distances from current node to all nodes [batch, N] (no NaNs)."""
-        cur = self.current_loc()  # [B,2]
-        dif = self.locs - cur.unsqueeze(1)  # [B,N,2]
-        d = torch.linalg.norm(dif, dim=-1, ord=2)  # [B,N]
-        if normalize:
-            d = d / self.graph_scale()
-        return d
+    # def distances_from_current(self, normalize: bool = True) -> torch.Tensor:
+    #     """Distances from current node to all nodes [batch, N] (no NaNs)."""
+    #     cur = self.current_loc()  # [B,2]
+    #     dif = self.locs - cur.unsqueeze(1)  # [B,N,2]
+    #     d = torch.linalg.norm(dif, dim=-1, ord=2)  # [B,N]
+    #     if normalize:
+    #         d = d / self.graph_scale()
+    #     return d
 
     def distance_matrix(self, normalize: bool = True) -> torch.Tensor:
         """Full pairwise distance matrix [batch, N, N]. Diagonal is 0.
@@ -126,59 +126,59 @@ class TSPStateView:
         d[..., ii, ii] = 0.0
         return d
 
-    def nearest_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
-        """Nearest distance to any unvisited node [batch, 1]; 0 if none remain."""
-        d = self.distances_to_unvisited(normalize=normalize)  # [B,N] with NaNs
-        # replace NaNs with +inf to take min
-        d_inf = torch.nan_to_num(d, nan=float("inf"))
-        mn = d_inf.min(dim=-1).values  # [B]
-        mn = torch.where(torch.isinf(mn), torch.zeros_like(mn), mn)
-        return mn.unsqueeze(-1)
+    # def nearest_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
+    #     """Nearest distance to any unvisited node [batch, 1]; 0 if none remain."""
+    #     d = self.distances_to_unvisited(normalize=normalize)  # [B,N] with NaNs
+    #     # replace NaNs with +inf to take min
+    #     d_inf = torch.nan_to_num(d, nan=float("inf"))
+    #     mn = d_inf.min(dim=-1).values  # [B]
+    #     mn = torch.where(torch.isinf(mn), torch.zeros_like(mn), mn)
+    #     return mn.unsqueeze(-1)
 
-    def k_nearest_unvisited(self, k: int = 3, normalize: bool = True) -> torch.Tensor:
-        """Return k smallest distances to unvisited nodes sorted ascending [batch, k].
+    # def k_nearest_unvisited(self, k: int = 3, normalize: bool = True) -> torch.Tensor:
+    #     """Return k smallest distances to unvisited nodes sorted ascending [batch, k].
 
-        If fewer than k nodes remain, pad with zeros at the end.
-        """
-        d = self.distances_to_unvisited(normalize=normalize)  # [B,N]
-        d_inf = torch.nan_to_num(d, nan=float("inf"))
-        vals, _ = torch.sort(d_inf, dim=-1)  # ascending
-        topk = vals[..., :k]
-        # replace inf (no available) with 0 for stability
-        topk = torch.where(torch.isinf(topk), torch.zeros_like(topk), topk)
-        # pad if N < k (should not happen for typical TSP), keep interface robust
-        if topk.shape[-1] < k:
-            pad = k - topk.shape[-1]
-            topk = torch.nn.functional.pad(topk, (0, pad), value=0.0)
-        return topk  # [B,k]
+    #     If fewer than k nodes remain, pad with zeros at the end.
+    #     """
+    #     d = self.distances_to_unvisited(normalize=normalize)  # [B,N]
+    #     d_inf = torch.nan_to_num(d, nan=float("inf"))
+    #     vals, _ = torch.sort(d_inf, dim=-1)  # ascending
+    #     topk = vals[..., :k]
+    #     # replace inf (no available) with 0 for stability
+    #     topk = torch.where(torch.isinf(topk), torch.zeros_like(topk), topk)
+    #     # pad if N < k (should not happen for typical TSP), keep interface robust
+    #     if topk.shape[-1] < k:
+    #         pad = k - topk.shape[-1]
+    #         topk = torch.nn.functional.pad(topk, (0, pad), value=0.0)
+    #     return topk  # [B,k]
 
-    def centroid_unvisited(self) -> torch.Tensor:
-        """Centroid of unvisited nodes [batch, 2]; if none remain, returns current_loc()."""
-        mask = self.action_mask.float()  # [B,N]
-        w = mask.unsqueeze(-1)  # [B,N,1]
-        sum_w = mask.sum(dim=-1, keepdim=True).clamp_min(1e-6)  # [B,1]
-        mean = (self.locs * w).nan_to_num(0.0).sum(dim=-2) / sum_w  # [B,2]
-        # if none remain, fall back to current_loc
-        none_left = (mask.sum(dim=-1) == 0).unsqueeze(-1)
-        return torch.where(none_left, self.current_loc(), mean)
+    # def centroid_unvisited(self) -> torch.Tensor:
+    #     """Centroid of unvisited nodes [batch, 2]; if none remain, returns current_loc()."""
+    #     mask = self.action_mask.float()  # [B,N]
+    #     w = mask.unsqueeze(-1)  # [B,N,1]
+    #     sum_w = mask.sum(dim=-1, keepdim=True).clamp_min(1e-6)  # [B,1]
+    #     mean = (self.locs * w).nan_to_num(0.0).sum(dim=-2) / sum_w  # [B,2]
+    #     # if none remain, fall back to current_loc
+    #     none_left = (mask.sum(dim=-1) == 0).unsqueeze(-1)
+    #     return torch.where(none_left, self.current_loc(), mean)
 
-    def distance_to_centroid(self, normalize: bool = True) -> torch.Tensor:
-        """Distance from current node to centroid of unvisited [batch, 1]."""
-        cur = self.current_loc()
-        cen = self.centroid_unvisited()
-        d = torch.linalg.norm(cur - cen, dim=-1, ord=2).unsqueeze(-1)
-        if normalize:
-            d = d / self.graph_scale()
-        return d
+    # def distance_to_centroid(self, normalize: bool = True) -> torch.Tensor:
+    #     """Distance from current node to centroid of unvisited [batch, 1]."""
+    #     cur = self.current_loc()
+    #     cen = self.centroid_unvisited()
+    #     d = torch.linalg.norm(cur - cen, dim=-1, ord=2).unsqueeze(-1)
+    #     if normalize:
+    #         d = d / self.graph_scale()
+    #     return d
 
-    def distance_to_start(self, normalize: bool = True) -> torch.Tensor:
-        """Distance from current node to start node [batch, 1]."""
-        cur = self.current_loc()
-        st = self.start_loc()
-        d = torch.linalg.norm(cur - st, dim=-1, ord=2).unsqueeze(-1)
-        if normalize:
-            d = d / self.graph_scale()
-        return d
+    # def distance_to_start(self, normalize: bool = True) -> torch.Tensor:
+    #     """Distance from current node to start node [batch, 1]."""
+    #     cur = self.current_loc()
+    #     st = self.start_loc()
+    #     d = torch.linalg.norm(cur - st, dim=-1, ord=2).unsqueeze(-1)
+    #     if normalize:
+    #         d = d / self.graph_scale()
+    #     return d
 
 
 class DensePBRSTSPEnv(DenseRewardTSPEnv):
@@ -335,35 +335,35 @@ class InvariantTSPStateView:
         return self._base.step_ratio()
 
     # Geometry scalars/vectors (fixed size)
-    def graph_scale(self) -> torch.Tensor:
-        return self._base.graph_scale()
+    # def graph_scale(self) -> torch.Tensor:
+    #     return self._base.graph_scale()
 
-    def nearest_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
-        return self._base.nearest_unvisited_distance(normalize=normalize)
+    # def nearest_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
+    #     return self._base.nearest_unvisited_distance(normalize=normalize)
 
-    def k_nearest_unvisited(self, k: int = 3, normalize: bool = True) -> torch.Tensor:
-        return self._base.k_nearest_unvisited(k=k, normalize=normalize)
+    # def k_nearest_unvisited(self, k: int = 3, normalize: bool = True) -> torch.Tensor:
+    #     return self._base.k_nearest_unvisited(k=k, normalize=normalize)
 
-    def k_farthest_unvisited(self, k: int = 3, normalize: bool = True) -> torch.Tensor:
-        return self._base.k_farthest_unvisited(k=k, normalize=normalize)
+    # def k_farthest_unvisited(self, k: int = 3, normalize: bool = True) -> torch.Tensor:
+    #     return self._base.k_farthest_unvisited(k=k, normalize=normalize)
 
-    def mean_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
-        return self._base.mean_unvisited_distance(normalize=normalize)
+    # def mean_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
+    #     return self._base.mean_unvisited_distance(normalize=normalize)
 
-    def max_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
-        return self._base.max_unvisited_distance(normalize=normalize)
+    # def max_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
+    #     return self._base.max_unvisited_distance(normalize=normalize)
 
-    def std_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
-        return self._base.std_unvisited_distance(normalize=normalize)
+    # def std_unvisited_distance(self, normalize: bool = True) -> torch.Tensor:
+    #     return self._base.std_unvisited_distance(normalize=normalize)
 
-    def centroid_unvisited(self) -> torch.Tensor:
-        return self._base.centroid_unvisited()
+    # def centroid_unvisited(self) -> torch.Tensor:
+    #     return self._base.centroid_unvisited()
 
-    def distance_to_centroid(self, normalize: bool = True) -> torch.Tensor:
-        return self._base.distance_to_centroid(normalize=normalize)
+    # def distance_to_centroid(self, normalize: bool = True) -> torch.Tensor:
+    #     return self._base.distance_to_centroid(normalize=normalize)
 
-    def distance_to_start(self, normalize: bool = True) -> torch.Tensor:
-        return self._base.distance_to_start(normalize=normalize)
+    # def distance_to_start(self, normalize: bool = True) -> torch.Tensor:
+    #     return self._base.distance_to_start(normalize=normalize)
 
     # Optional fixed-size references
     def current_loc(self) -> torch.Tensor:
@@ -388,8 +388,8 @@ class InvariantTSPStateView:
     def first_node_index(self) -> torch.Tensor:
         return self._base.first_node_index()
 
-    def distances_from_current(self, normalize: bool = True) -> torch.Tensor:
-        return self._base.distances_from_current(normalize=normalize)
+    # def distances_from_current(self, normalize: bool = True) -> torch.Tensor:
+    #     return self._base.distances_from_current(normalize=normalize)
 
     def distance_matrix(self, normalize: bool = True) -> torch.Tensor:
         return self._base.distance_matrix(normalize=normalize)

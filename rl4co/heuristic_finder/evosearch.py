@@ -314,6 +314,7 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
         init_codes = eoh_llm_i1(cfg.ollama_model, n=total_init, env_name="tsp", debug=False)
         specs = compile_candidates(init_codes)
         if not specs:
+            print(init_codes)
             raise RuntimeError("LLM produced no valid initial candidates. Check provider, API key, and model.")
         init_cands: List[Candidate] = []
         seen_pop: Set[str] = set()

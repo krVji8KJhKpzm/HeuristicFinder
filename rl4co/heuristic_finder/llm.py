@@ -337,8 +337,8 @@ def generate_candidates_via_deepseek(
                                 },
                                 {"role": "user", "content": _build_repair_instruction(cleaned)},
                             ],
-                            "temperature": 0.2,
-                            "max_tokens": 1024,
+                            "temperature": 0.0,
+                            "max_tokens": 32768,
                             "stream": False,
                         }
                         try:

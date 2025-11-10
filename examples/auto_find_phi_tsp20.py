@@ -1,4 +1,4 @@
-"""
+﻿"""
 EoH-style multi-population search for Phi(state) on TSP-20 with optional full training.
 
 Steps:
@@ -29,7 +29,13 @@ import subprocess
 from typing import List
 
 from rl4co.heuristic_finder.evosearch import EvoConfig, evolution_search
+from dotenv import load_dotenv
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
+
+api_key = os.getenv("DEEPSEEK_API_KEY")
+print("DEEPSEEK_API_KEY:", api_key)
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()

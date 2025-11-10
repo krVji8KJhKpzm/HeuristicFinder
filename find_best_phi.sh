@@ -10,7 +10,7 @@ echo "[INFO] Launching EoH-style multi-pop search via DeepSeek API (logs: find_b
 # Required: export DEEPSEEK_API_KEY in your environment (already set as you mentioned).
 # Optional overrides (defaults below):
 export DEEPSEEK_API_BASE="${DEEPSEEK_API_BASE:-https://api.deepseek.com/v1}"
-export DEEPSEEK_MODEL="${DEEPSEEK_MODEL:-deepseek-chat}"
+export DEEPSEEK_MODEL="${DEEPSEEK_MODEL:-deepseek-reasoner}"
 export DEEPSEEK_MAX_TOKENS="${DEEPSEEK_MAX_TOKENS:-32768}"
 export DEEPSEEK_TEMPERATURE="${DEEPSEEK_TEMPERATURE:-0.0}"
 
@@ -18,10 +18,11 @@ export DEEPSEEK_TEMPERATURE="${DEEPSEEK_TEMPERATURE:-0.0}"
 # Controls the TSP size used during short-training fitness (train_fitness_phi_on_tsp20).
 # Default to 20 to match TSP-20; change to 50, 100, etc. as needed.
 export TSP_NUM_LOC="${TSP_NUM_LOC:-20}"
+export LLM_DEBUG="1"
 
 # ===== Evolution settings (EoH-style) =====
 N_POPS=${N_POPS:-4}
-POP_SIZE=${POP_SIZE:-8}
+POP_SIZE=${POP_SIZE:-10}
 GENERATIONS=${GENERATIONS:-10}
 OPERATORS=${OPERATORS:-e1,e2,m1,m2}
 OP_WEIGHTS=${OP_WEIGHTS:-1,1,1,1}
@@ -51,7 +52,7 @@ DUMP_DIR=${DUMP_DIR:-runs/eoh}
 SAVE_PATH=${SAVE_PATH:-phi_best.py}
 TOPK=${TOPK:-5}
 SEED=${SEED:-1234}
-GPU_IDS=${GPU_IDS:-}        # e.g., "0,1,2,3" for parallel short-training; leave empty for CPU
+GPU_IDS=${GPU_IDS:-0,1,2,3,4,5,6,7}        # e.g., "0,1,2,3" for parallel short-training; leave empty for CPU
 
 # Build command (no Ollama flags; we use DeepSeek API via env)
 cmd=(python examples/auto_find_phi_tsp20.py
