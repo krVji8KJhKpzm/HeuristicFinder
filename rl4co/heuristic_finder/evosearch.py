@@ -6,7 +6,7 @@ import re
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Set
 
 from rl4co.heuristic_finder.evaluate import train_fitness_phi_on_tsp20
 from rl4co.heuristic_finder.llm import (
@@ -16,15 +16,10 @@ from rl4co.heuristic_finder.llm import (
     eoh_llm_m1,
     eoh_llm_m2,
     eoh_llm_m3,
-    eoh_llm_mutate,
-    eoh_llm_crossover,
+    eoh_llm_repair,
 )
 from rl4co.heuristic_finder.potential import PotentialSpec, compile_potential
-from rl4co.heuristic_finder.diagnostics import (
-    profile_phi_on_tsp,
-    summarize_profile_for_prompt,
-    save_profile_json,
-)
+# diagnostics removed in EoH-faithful loop (no reflection)
 
 
 @dataclass
@@ -33,14 +28,20 @@ class Candidate:
 
     spec: PotentialSpec
     gamma: float
+    thought: Optional[str] = None
+    code_hash: Optional[str] = None
 
 
 @dataclass
 class EvoConfig:
-    population_size: int = 4
-    survivors: int = 2
-    iterations: int = 2
-    offspring_per_iter: int = 2
+    # Multi-population controls (EoH style)
+    n_pops: int = 1  # number of independent populations (EoH ec_n_pop)
+    pop_size: int = 4  # individuals per population (EoH ec_pop_size)
+    # Backward compatibility aliases:
+    population_size: int = 4  # alias for pop_size
+    generations: int = 2  # number of evolutionary generations
+    iterations: int = 2  # alias for generations
+    # Fitness evaluation
     epochs_per_eval: int = 1
     batch_size: int = 64
     train_size: int = 1000
@@ -49,32 +50,38 @@ class EvoConfig:
     device: str = "cpu"
     # LLM via Ollama only
     ollama_model: Optional[str] = None  # e.g., 'qwen3:32b'
-    # EoH-style evolution controls (always enabled)
-    frac_crossover: float = 0.5  # fraction of offspring via crossover
-    tournament_k: int = 2  # tournament size for selecting parents
-    novelty_weight: float = 0.0  # add small novelty pressure in selection
+    # EoH-style operator schedule
+    operators: Optional[List[str]] = None  # e.g., ['e1','e2','m1','m2']
+    operator_weights: Optional[List[float]] = None  # per-operator probability
+    m_parents: int = 2  # number of parents for e1/e2
+    tournament_k: int = 2  # tournament size
     # Optional: parallel short-training across multiple GPUs
     gpu_ids: Optional[List[int]] = None
     # Optional dir to dump all candidate codes per generation
     dump_dir: Optional[str] = None
     # Optional fixed seed for reproducible short-training
     seed: Optional[int] = None
+    # PBRS controls
     pbrs_gamma_choices: Optional[List[float]] = None
     reward_scale: Optional[str] = None
     center_dphi: bool = False
     norm_dphi: bool = False
     # Penalize candidates whose estimated tour length exceeds this threshold
     objective_bad_threshold: float = 5.0
-    # Selection controls
-    include_parents: bool = True  # (mu + lambda) selection; parents compete with offspring
-    offspring_factor: int = 6  # keep top (offspring_factor * N) offspring before selection
-    # Optional: run diagnostics and feed summary to LLM prompts
-    diag_for_llm: bool = False
-    diag_num_loc: Optional[List[int]] = None  # e.g., [20, 50]
-    diag_batches_per_n: int = 2
-    diag_batch_size: int = 128
-    diag_gamma: float = 1.0
-    diag_device: Optional[str] = None  # default to cfg.device
+    # EoH-init: create this many x N seeds via i1
+    initial_copies: int = 2
+    # Keep gamma fixed by default to match EoH (no hyper evolution)
+    mutate_gamma: bool = False
+    # Diversity & dedup
+    dedup_within_pop: bool = True
+    dedup_global: bool = True
+    # Thought & memetic
+    enable_thought: bool = True
+    memetic_repair_prob: float = 0.0  # chance to apply a light repair LLM pass
+    # Elite archive
+    archive_top_k: int = 8
+    elite_parent_k: int = 0
+    elite_replace_worst: int = 0
 
 
 def compile_candidates(codes: List[str]) -> List[PotentialSpec]:
@@ -103,213 +110,308 @@ def _mutate_gamma(parent_gamma: float, cfg: EvoConfig) -> float:
     return max(min(g, 2.0), -2.0)
 
 
-def propose_offspring(
-    parents: List[Candidate],
+def _init_gamma(cfg: EvoConfig) -> float:
+    if cfg.pbrs_gamma_choices and len(cfg.pbrs_gamma_choices) > 0:
+        return random.choice(cfg.pbrs_gamma_choices)
+    return 1.0
+
+
+def _tournament_select(scored: List[Tuple[Candidate, float]], m: int, k: int) -> List[Candidate]:
+    """Tournament selection (maximize reward) mirroring EoH's tournament (min objective)."""
+    parents: List[Candidate] = []
+    if not scored:
+        return parents
+    while len(parents) < m:
+        tour = random.sample(scored, k=min(k, len(scored)))
+        winner = max(tour, key=lambda x: x[1])[0]
+        parents.append(winner)
+    return parents
+
+
+def _parents_pack(pars: List[Candidate]) -> List[dict]:
+    pack = []
+    for p in pars:
+        alg = p.thought if (p.thought is not None and len(p.thought) > 0) else "(no description)"
+        pack.append({"algorithm": alg, "code": p.spec.code})
+    return pack
+
+
+def _propose_offspring_for_operator(
+    scored: List[Tuple[Candidate, float]],
     cfg: EvoConfig,
-    eval_summaries: Optional[dict] = None,
+    operator: str,
 ) -> List[Candidate]:
-    """Generate offspring using EoH ops on code, and mutate gamma as part of genome."""
-    offspring: List[Candidate] = []
+    """Faithful EoH-style offspring generation for a single operator.
 
-    if not cfg.ollama_model:
-        print("[HeuristicFinder] No --ollama-model provided; using DeepSeek API fallback.", flush=True)
+    Generates exactly N (=population_size) new candidates using tournament selection
+    from the current population and the specified operator.
+    """
+    # individuals per operator call equals the per-population size
+    ps = cfg.pop_size if cfg.pop_size is not None else cfg.population_size
+    N = int(ps)
+    out: List[Candidate] = []
 
-    # Helper to build a small parent pack with 'p' first for diversity
-    def build_pack(p: Candidate, all_parents: List[Candidate], k_ctx: int = 3):
-        pool = [q for q in all_parents if q is not p]
-        ctx = random.sample(pool, k=min(max(k_ctx - 1, 0), len(pool))) if pool else []
-        ordered = [p] + ctx
-        return [{"algorithm": "(no description)", "code": sp.spec.code} for sp in ordered]
+    for _ in range(N):
+        try:
+            if operator in ("e1", "e2"):
+                pars = _tournament_select(scored, m=cfg.m_parents, k=cfg.tournament_k)
+                pack = _parents_pack(pars)
+                if operator == "e1":
+                    codes = eoh_llm_e1(cfg.ollama_model, pack, n=1, env_name="tsp", debug=False)
+                else:
+                    codes = eoh_llm_e2(cfg.ollama_model, pack, n=1, env_name="tsp", debug=False)
+            elif operator == "m1":
+                par = _tournament_select(scored, m=1, k=cfg.tournament_k)[0]
+                codes = eoh_llm_m1(cfg.ollama_model, par.spec.code, n=1, env_name="tsp", debug=False)
+            elif operator == "m2":
+                par = _tournament_select(scored, m=1, k=cfg.tournament_k)[0]
+                codes = eoh_llm_m2(cfg.ollama_model, par.spec.code, n=1, env_name="tsp", debug=False)
+            elif operator == "m3":
+                par = _tournament_select(scored, m=1, k=cfg.tournament_k)[0]
+                codes = eoh_llm_m3(cfg.ollama_model, par.spec.code, n=1, env_name="tsp", debug=False)
+            else:
+                # unknown operator: skip
+                continue
 
-    for p in parents:
-        # Retrieve optional eval summary for this parent
-        p_summary = None
-        if eval_summaries is not None:
-            p_summary = eval_summaries.get(p.spec.code)
-        try:
-            # e1
-            pack = build_pack(p, parents, k_ctx=3)
-            codes = eoh_llm_e1(cfg.ollama_model, pack, n=1, env_name="tsp", debug=True)
-            for sp in compile_candidates(codes):
-                offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
-        except Exception:
-            pass
-        try:
-            # e2
-            pack = build_pack(p, parents, k_ctx=3)
-            codes = eoh_llm_e2(cfg.ollama_model, pack, n=1, env_name="tsp", debug=True)
-            for sp in compile_candidates(codes):
-                offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
-        except Exception:
-            pass
-        try:
-            # m1
-            codes = eoh_llm_m1(cfg.ollama_model, p.spec.code, n=1, env_name="tsp", debug=True)
-            for sp in compile_candidates(codes):
-                offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
-        except Exception:
-            pass
-        try:
-            # m2
-            codes = eoh_llm_m2(cfg.ollama_model, p.spec.code, n=1, env_name="tsp", debug=True)
-            for sp in compile_candidates(codes):
-                offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
-        except Exception:
-            pass
-        try:
-            # m3
-            codes = eoh_llm_m3(cfg.ollama_model, p.spec.code, n=1, env_name="tsp", debug=True)
-            for sp in compile_candidates(codes):
-                offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
-        except Exception:
-            pass
+            # Optional memetic light repair on raw generation
+            if cfg.memetic_repair_prob > 0.0 and random.random() < float(cfg.memetic_repair_prob):
+                try:
+                    repaired: List[str] = []
+                    for c in codes:
+                        rc = eoh_llm_repair(cfg.ollama_model, c, env_name="tsp", n=1, debug=False)
+                        repaired.append(rc[0] if rc else c)
+                    codes = repaired
+                except Exception:
+                    pass
 
-        # Reflection-guided mutate/crossover using eval summary (if provided)
-        if p_summary:
+            specs = compile_candidates(codes)
+            for sp in specs:
+                g = _mutate_gamma(_init_gamma(cfg), cfg) if cfg.mutate_gamma else _init_gamma(cfg)
+                th = extract_thought(sp.code) if cfg.enable_thought else None
+                ch = compute_code_hash(sp.code)
+                out.append(Candidate(spec=sp, gamma=g, thought=th, code_hash=ch))
+        except Exception:
+            continue
+
+    return out
+
+
+class EliteArchive:
+    def __init__(self, top_k: int = 8, dump_dir: Optional[str] = None):
+        self.top_k = int(top_k)
+        self.entries: List[Tuple[Candidate, float]] = []
+        self.hashes: Set[str] = set()
+        self.dump_path = None
+        if dump_dir:
             try:
-                # mutate with eval summary
-                codes = eoh_llm_mutate(
-                    model=cfg.ollama_model or "",
-                    parent_code=p.spec.code,
-                    env_name="tsp",
-                    guidance="Prefer low-variance, N-invariant features; normalize by graph_scale; avoid heavy branching.",
-                    eval_summary=p_summary,
-                    n=1,
-                    debug=True,
-                )
-                for sp in compile_candidates(codes):
-                    offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
+                os.makedirs(dump_dir, exist_ok=True)
+                self.dump_path = os.path.join(dump_dir, "archive.jsonl")
             except Exception:
-                pass
-            try:
-                # crossover with a random other parent + merged summaries
-                pool = [q for q in parents if q is not p]
-                if pool:
-                    q = random.choice(pool)
-                    q_summary = eval_summaries.get(q.spec.code, "") if eval_summaries else ""
-                    merged_summary = f"Parent A summary:\n{p_summary}\nParent B summary:\n{q_summary}"
-                    codes = eoh_llm_crossover(
-                        model=cfg.ollama_model or "",
-                        parent_a=p.spec.code,
-                        parent_b=q.spec.code,
-                        env_name="tsp",
-                        guidance="Blend complementary, stable cues; keep output scale moderate; ensure broadcastability [B,1].",
-                        eval_summary=merged_summary,
-                        n=1,
-                        debug=True,
-                    )
-                    for sp in compile_candidates(codes):
-                        offspring.append(Candidate(spec=sp, gamma=_mutate_gamma(p.gamma, cfg)))
-            except Exception:
-                pass
+                self.dump_path = None
 
-        # gamma-only mutation (keep code)
-        try:
-            offspring.append(Candidate(spec=p.spec, gamma=_mutate_gamma(p.gamma, cfg)))
-        except Exception:
-            pass
+    def update(self, scored: List[Tuple[Candidate, float]]):
+        changed = False
+        for cand, score in scored:
+            h = cand.code_hash or compute_code_hash(cand.spec.code)
+            if h in self.hashes:
+                continue
+            self.entries.append((cand, score))
+            self.hashes.add(h)
+            changed = True
+        if changed:
+            # keep top-k by score
+            self.entries.sort(key=lambda x: x[1], reverse=True)
+            self.entries = self.entries[: self.top_k]
+            self.hashes = set((c.code_hash or compute_code_hash(c.spec.code)) for c, _ in self.entries)
+            if self.dump_path:
+                try:
+                    with open(self.dump_path, "a", encoding="utf-8") as f:
+                        for c, s in scored:
+                            rec = {
+                                "score": float(s),
+                                "gamma": float(c.gamma),
+                                "thought": c.thought,
+                                "code_hash": c.code_hash or compute_code_hash(c.spec.code),
+                                "code": c.spec.code,
+                            }
+                            import json as _json
 
-    return offspring
+                            f.write(_json.dumps(rec, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+
+    def top_parents_pack(self, k: int) -> List[Dict[str, str]]:
+        if k <= 0 or len(self.entries) == 0:
+            return []
+        sel = self.entries[: min(k, len(self.entries))]
+        pack = []
+        for c, _ in sel:
+            alg = c.thought if (c.thought is not None and len(c.thought) > 0) else "(no description)"
+            pack.append({"algorithm": alg, "code": c.spec.code})
+        return pack
+
+
+# ---------------- Diversity & Thought helpers -----------------
+import ast
+import hashlib
+
+
+def _ast_signature(code: str) -> str:
+    try:
+        # Extract the phi function region for hashing robustness
+        m = re.search(r"def\s+phi\s*\(.*?\):[\s\S]*", code)
+        span = m.group(0) if m else code
+        tree = ast.parse(span)
+        return ast.dump(tree, annotate_fields=False, include_attributes=False)
+    except Exception:
+        # fallback to stripped text
+        return re.sub(r"\s+", " ", code).strip()
+
+
+def compute_code_hash(code: str) -> str:
+    sig = _ast_signature(code)
+    h = hashlib.sha256(sig.encode("utf-8")).hexdigest()
+    return h
+
+
+def extract_thought(code: str) -> Optional[str]:
+    try:
+        m = re.search(r"^\s*#\s*THOUGHT:\s*\{([^}]*)\}\s*$", code, flags=re.IGNORECASE | re.MULTILINE)
+        if m:
+            return m.group(1).strip()
+    except Exception:
+        return None
+    return None
 
 
 def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
-    # init population via LLM i1 (EoH style) using Ollama if provided, otherwise DeepSeek API
-    init_codes = eoh_llm_i1(cfg.ollama_model, n=cfg.population_size, env_name="tsp", debug=False)
-    specs = compile_candidates(init_codes)
-    if not specs:
-        print(init_codes)
-        raise RuntimeError("LLM produced no valid initial candidates. Check provider, API key, and model.")
+    """EoH-style multi-population evolution loop with diversity, repair, and elite archive.
 
-    def _init_gamma() -> float:
-        if cfg.pbrs_gamma_choices and len(cfg.pbrs_gamma_choices) > 0:
-            return random.choice(cfg.pbrs_gamma_choices)
-        return 1.0
+    - Independent populations with per-pop selection and variation
+    - Explicit deduplication via AST-hash within and across populations
+    - Optional memetic light-repair operator applied probabilistically
+    - Elite archive maintained across generations with optional parent injection
+    """
+    # Resolve default operators/weights if not provided
+    ops = cfg.operators if cfg.operators is not None else ["e1", "e2", "m1", "m2"]
+    op_weights = cfg.operator_weights if cfg.operator_weights is not None else [1.0 for _ in ops]
+    if len(op_weights) != len(ops):
+        op_weights = [1.0 for _ in ops]
 
-    population: List[Candidate] = [Candidate(spec=s, gamma=_init_gamma()) for s in specs]
-    scored: List[Tuple[Candidate, float]] = []
+    # Effective sizes
+    pop_size = int(cfg.pop_size if cfg.pop_size is not None else cfg.population_size)
+    n_pops = int(max(1, cfg.n_pops))
+    n_gen = int(cfg.generations if cfg.generations is not None else cfg.iterations)
 
-    # novelty archive (store fingerprints of best-so-far)
-    archive: List[Tuple[str, set]] = []  # (code, fingerprint)
+    # Global dedup state and elite archive
+    seen_global: Set[str] = set()
+    archive = EliteArchive(top_k=cfg.archive_top_k, dump_dir=cfg.dump_dir)
 
-    # evaluate initial population (possibly parallel)
-    init_results = _evaluate_population(population, cfg)
-    scored.extend(init_results)
-    if cfg.dump_dir:
-        _dump_candidates(cfg.dump_dir, init_results, gen_idx=0)
+    # Initialize populations independently
+    populations: List[List[Tuple[Candidate, float]]] = []
+    for pop_idx in range(n_pops):
+        total_init = pop_size * max(1, int(cfg.initial_copies))
+        init_codes = eoh_llm_i1(cfg.ollama_model, n=total_init, env_name="tsp", debug=False)
+        specs = compile_candidates(init_codes)
+        if not specs:
+            raise RuntimeError("LLM produced no valid initial candidates. Check provider, API key, and model.")
+        init_cands: List[Candidate] = []
+        seen_pop: Set[str] = set()
+        for s in specs:
+            th = extract_thought(s.code) if cfg.enable_thought else None
+            h = compute_code_hash(s.code)
+            if cfg.dedup_within_pop and h in seen_pop:
+                continue
+            if cfg.dedup_global and h in seen_global:
+                continue
+            seen_pop.add(h)
+            seen_global.add(h)
+            init_cands.append(Candidate(spec=s, gamma=_init_gamma(cfg), thought=th, code_hash=h))
+        # Evaluate and keep top-N
+        scored_init = _evaluate_population(init_cands, cfg)
+        scored_init.sort(key=lambda x: x[1], reverse=True)
+        scored_init = scored_init[:pop_size]
+        populations.append(scored_init)
+        archive.update(scored_init)
+        if cfg.dump_dir:
+            _dump_candidates(cfg.dump_dir, scored_init, gen_idx=0)
 
-    # iterate
-    for gen_idx in range(cfg.iterations):
-        # Use the entire current population as parents (size N)
-        scored.sort(key=lambda x: x[1], reverse=True)
-        parents = [s for s, _ in scored[: cfg.population_size]]
+    # Evolution by generations, population-wise independent selection
+    for gen_idx in range(n_gen):
+        for pop_idx in range(n_pops):
+            scored = populations[pop_idx]
+            # Optional: mix elite archive into parent pool by appending pseudo-scored elites
+            if cfg.elite_parent_k > 0:
+                elite_pack = archive.top_parents_pack(cfg.elite_parent_k)
+                # convert elite pack to temporary Candidates for parent pool only
+                temp_cands: List[Tuple[Candidate, float]] = []
+                for e in elite_pack:
+                    try:
+                        fn = compile_potential(e["code"])  # reuse compile here directly
+                        th = e.get("algorithm", None)
+                        ch = compute_code_hash(e["code"])
+                        temp_cands.append(
+                            (
+                                Candidate(
+                                    spec=PotentialSpec(name="elite", code=e["code"], fn=fn),
+                                    gamma=_init_gamma(cfg),
+                                    thought=th,
+                                    code_hash=ch,
+                                ),
+                                float("inf"),
+                            )
+                        )
+                    except Exception:
+                        continue
+                parent_pool = scored + temp_cands
+            else:
+                parent_pool = scored
 
-        # Optional: diagnostics for each parent and summary to feed LLM
-        eval_summaries = None
-        if cfg.diag_for_llm:
-            eval_summaries = {}
-            # prepare diagnostics params
-            sizes = cfg.diag_num_loc if (cfg.diag_num_loc and len(cfg.diag_num_loc) > 0) else [20, 50]
-            for pi, p in enumerate(parents):
-                try:
-                    prof = profile_phi_on_tsp(
-                        p.spec,
-                        num_loc_list=sizes,
-                        batches_per_n=cfg.diag_batches_per_n,
-                        batch_size=cfg.diag_batch_size,
-                        device=cfg.diag_device or cfg.device,
-                        seed=cfg.seed,
-                        gamma=cfg.diag_gamma,
-                    )
-                    summary = summarize_profile_for_prompt(prof)
-                    eval_summaries[p.spec.code] = summary
-                    if cfg.dump_dir:
-                        os.makedirs(cfg.dump_dir, exist_ok=True)
-                        fname = f"gen{gen_idx:02d}_parent{pi:03d}_diag.json"
-                        save_profile_json(prof, os.path.join(cfg.dump_dir, fname))
-                except Exception:
+            for op, pw in zip(ops, op_weights):
+                if random.random() > float(pw):
+                    continue
+                # Generate N offspring for this operator using current population parent_pool
+                offspring = _propose_offspring_for_operator(parent_pool, cfg, op)
+                if not offspring:
+                    continue
+                # Dedup offspring
+                filtered: List[Candidate] = []
+                seen_pop_hashes = set(c.code_hash for c, _ in scored if c.code_hash)
+                for c in offspring:
+                    h = c.code_hash or compute_code_hash(c.spec.code)
+                    if cfg.dedup_within_pop and h in seen_pop_hashes:
+                        continue
+                    if cfg.dedup_global and h in seen_global:
+                        continue
+                    seen_pop_hashes.add(h)
+                    seen_global.add(h)
+                    filtered.append(c)
+                if not filtered:
                     continue
 
-        # propose offspring: baseline ops + (optional) reflection-guided ops
-        offspring = propose_offspring(parents, cfg, eval_summaries=eval_summaries)
+                off_results = _evaluate_population(filtered, cfg)
+                # Merge and keep top-N
+                scored.extend(off_results)
+                scored.sort(key=lambda x: x[1], reverse=True)
+                scored = scored[:pop_size]
+                # Optional elite replacement of worst
+                if cfg.elite_replace_worst > 0 and len(archive.entries) > 0:
+                    k = min(cfg.elite_replace_worst, len(scored), len(archive.entries))
+                    elites_to_inject = [archive.entries[i][0] for i in range(k)]
+                    # replace last k individuals
+                    for i in range(k):
+                        scored[-(i + 1)] = (elites_to_inject[i], float("inf"))
+                populations[pop_idx] = scored
+                archive.update(scored)
+                if cfg.dump_dir:
+                    _dump_candidates(cfg.dump_dir, scored, gen_idx=gen_idx + 1)
 
-        # evaluate offspring (possibly parallel)
-        off_results = _evaluate_population(offspring, cfg)
-        if cfg.dump_dir:
-            _dump_candidates(cfg.dump_dir, off_results, gen_idx=gen_idx + 1)
-
-        # Optionally keep only top-K offspring before combining with parents
-        if off_results:
-            if cfg.novelty_weight > 0:
-                ranked_off = _rank_with_novelty(off_results, archive, cfg.novelty_weight)
-            else:
-                ranked_off = sorted(off_results, key=lambda x: x[1], reverse=True)
-            k_off = max(cfg.population_size * max(1, int(cfg.offspring_factor)), cfg.population_size)
-            ranked_off = ranked_off[: k_off]
-        else:
-            ranked_off = []
-
-        # (mu + lambda) selection: combine parents and offspring, then select top-N
-        combined = list(ranked_off)
-        if cfg.include_parents and scored:
-            combined.extend(scored)
-
-        if cfg.novelty_weight > 0 and combined:
-            next_scored = _rank_with_novelty(combined, archive, cfg.novelty_weight)[: cfg.population_size]
-        else:
-            next_scored = sorted(combined, key=lambda x: x[1], reverse=True)[: cfg.population_size]
-        scored = next_scored
-
-        # update novelty archive with current best of new generation
-        if scored:
-            for cand, _ in scored[: cfg.population_size]:
-                fp = _code_fingerprint(cand.spec.code)
-                archive.append((cand.spec.code, fp))
-            if len(archive) > 200:
-                archive = archive[-200:]
-
-    # final ranking
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return scored
+    # Collect and return global top
+    all_scored: List[Tuple[Candidate, float]] = []
+    for s in populations:
+        all_scored.extend(s)
+    all_scored.sort(key=lambda x: x[1], reverse=True)
+    return all_scored
 
 
 def _worker_eval(args: Tuple[Tuple[str, float], dict, Optional[int]]):
@@ -416,70 +518,52 @@ def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[C
     return results
 
 
-# ----------------- Novelty helpers (lightweight) -----------------
-def _code_fingerprint(code: str) -> set:
-    """Very simple AST-based fingerprint: set of identifier and attribute names.
-
-    Used to compute a rough Jaccard-based novelty score.
-    """
-    try:
-        import ast
-
-        tree = ast.parse(code)
-        toks = set()
-        for node in ast.walk(tree):
-            if hasattr(node, "id") and isinstance(getattr(node, "id"), str):
-                toks.add(getattr(node, "id"))
-            if hasattr(node, "attr") and isinstance(getattr(node, "attr"), str):
-                toks.add(getattr(node, "attr"))
-        return toks
-    except Exception:
-        # fallback to tokenized words
-        return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", code))
-
-
-def _jaccard(a: set, b: set) -> float:
-    if not a and not b:
-        return 0.0
-    inter = len(a & b)
-    union = len(a | b)
-    return inter / union if union > 0 else 0.0
-
-
-def _novelty(code: str, archive: List[Tuple[str, set]]) -> float:
-    fp = _code_fingerprint(code)
-    if not archive:
-        return 1.0
-    sim = max((_jaccard(fp, bfp) for _, bfp in archive), default=0.0)
-    return 1.0 - sim
-
-
-def _rank_with_novelty(
-    scored: List[Tuple[Candidate, float]],
-    archive: List[Tuple[str, set]],
-    novelty_weight: float,
-) -> List[Tuple[Candidate, float]]:
-    # Sort by (fitness + novelty_weight * novelty)
-    decorated = []
-    for cand, fit in scored:
-        nv = _novelty(cand.spec.code, archive)
-        decorated.append((cand, fit + novelty_weight * nv))
-    decorated.sort(key=lambda x: x[1], reverse=True)
-    return decorated
-
-
 def _sanitize_filename(name: str) -> str:
     return "".join(c if c.isalnum() or c in ("_", "-", ".") else "_" for c in name)[:120]
 
 
 def _dump_candidates(dump_dir: str, results: List[Tuple[Candidate, float]], gen_idx: int):
     os.makedirs(dump_dir, exist_ok=True)
+    manifest_path = os.path.join(dump_dir, f"gen{gen_idx:02d}.jsonl")
     for i, (cand, score) in enumerate(results):
         base = f"gen{gen_idx:02d}_cand{i:03d}_{_sanitize_filename(cand.spec.name)}_{score:.4f}.py"
         path = os.path.join(dump_dir, base)
         try:
+            thought = cand.thought if cand.thought else extract_thought(cand.spec.code)
+            code_hash = cand.code_hash if cand.code_hash else compute_code_hash(cand.spec.code)
             with open(path, "w", encoding="utf-8") as f:
-                f.write(f"# score={score:.6f}\n")
+                f.write(f"# score={float(score):.6f}\n")
+                if cand.gamma is not None:
+                    try:
+                        f.write(f"# gamma={float(cand.gamma):.6f}\n")
+                    except Exception:
+                        pass
+                if code_hash:
+                    f.write(f"# code_hash={code_hash}\n")
+                if thought:
+                    # keep the one-sentence idea; ensure braces for consistency
+                    if not (thought.startswith("{") and thought.endswith("}")):
+                        tline = "# THOUGHT: {" + thought + "}"
+                    else:
+                        tline = "# THOUGHT: " + thought
+                    f.write(tline + "\n")
                 f.write(cand.spec.code)
+            # append manifest entry
+            try:
+                import json as _json
+
+                rec = {
+                    "gen": int(gen_idx),
+                    "index": int(i),
+                    "file": base,
+                    "score": float(score),
+                    "gamma": float(cand.gamma),
+                    "code_hash": code_hash,
+                    "thought": thought,
+                }
+                with open(manifest_path, "a", encoding="utf-8") as mf:
+                    mf.write(_json.dumps(rec, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
         except Exception:
             pass

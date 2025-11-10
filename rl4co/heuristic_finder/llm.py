@@ -543,6 +543,7 @@ def _prompt_i1(env_name: str = "tsp") -> str:
     return (
         p["task"]
         + "\nReturn ONLY a valid Python function named 'phi' that accepts 'state' and returns a tensor broadcastable to [B,1].\n"
+        + "Before the function, add a single Python comment line starting with '# THOUGHT: {your one-sentence idea here}' describing the main idea in braces.\n"
         + p["inout_inf"]
         + " "
         + p["other_inf"]
@@ -563,8 +564,9 @@ def _prompt_e1(parents: List[Dict[str, str]], env_name: str = "tsp") -> str:
         + " existing algorithms with their codes as follows: \n"
         + prompt_indiv
         + "Please help me create a new algorithm that has a totally different form from the given ones. \n"
-        + "First, describe your new algorithm and main steps in one sentence. "
-        + "The description must be inside a brace. Next, implement it in Python as a function named "
+        + "First, describe your new algorithm and main steps in one sentence, and put it inside a single brace.\n"
+        + "Place this sentence as a Python comment on the first line: '# THOUGHT: { ... }'.\n"
+        + "Next, implement it in Python as a function named "
         + p["func_name"]
         + ". This function should accept "
         + str(len(p["func_inputs"]))
@@ -596,8 +598,9 @@ def _prompt_e2(parents: List[Dict[str, str]], env_name: str = "tsp") -> str:
         + " existing algorithms with their codes as follows: \n"
         + prompt_indiv
         + "Please help me create a new algorithm that has a totally different form from the given ones but can be motivated from them. \n"
-        + "Firstly, identify the common backbone idea in the provided algorithms. Secondly, based on the backbone idea describe your new algorithm in one sentence. "
-        + "The description must be inside a brace. Thirdly, implement it in Python as a function named "
+        + "Firstly, identify the common backbone idea in the provided algorithms. Secondly, based on the backbone idea describe your new algorithm in one sentence, inside a single brace.\n"
+        + "Place this sentence as a Python comment on the first line: '# THOUGHT: { ... }'.\n"
+        + "Thirdly, implement it in Python as a function named "
         + p["func_name"]
         + ". This function should accept "
         + str(len(p["func_inputs"]))
@@ -627,8 +630,8 @@ def _prompt_m1(parent: Dict[str, str], env_name: str = "tsp") -> str:
         + "\nCode:\n\n"
         + code
         + "\nPlease assist me in creating a new algorithm that has a different form but can be a modified version of the algorithm provided. \n"
-        + "First, describe your new algorithm and main steps in one sentence. "
-        + "The description must be inside a brace. Next, implement it in Python as a function named "
+        + "First, describe your new algorithm and main steps in one sentence, inside a single brace, and place it as the first line Python comment '# THOUGHT: { ... }'.\n"
+        + "Next, implement it in Python as a function named "
         + p["func_name"]
         + ". This function should accept "
         + str(len(p["func_inputs"]))
@@ -658,8 +661,8 @@ def _prompt_m2(parent: Dict[str, str], env_name: str = "tsp") -> str:
         + "\nCode:\n\n"
         + code
         + "\nPlease identify the main algorithm parameters and assist me in creating a new algorithm that has a different parameter settings of the score function provided. \n"
-        + "First, describe your new algorithm and main steps in one sentence. "
-        + "The description must be inside a brace. Next, implement it in Python as a function named "
+        + "First, describe your new algorithm and main steps in one sentence, inside a single brace, and place it as the first line Python comment '# THOUGHT: { ... }'.\n"
+        + "Next, implement it in Python as a function named "
         + p["func_name"]
         + ". This function should accept "
         + str(len(p["func_inputs"]))
@@ -684,12 +687,35 @@ def _prompt_m3(parent: Dict[str, str], env_name: str = "tsp") -> str:
         "First, you need to identify the main components in the function below. "
         "Next, analyze whether any of these components can be overfit to the in-distribution instances. "
         "Then, based on your analysis, simplify the components to enhance the generalization to potential out-of-distribution instances. "
-        "Finally, provide the revised code, keeping the function name, inputs, and outputs unchanged. \n"
+        "Finally, provide the revised code, keeping the function name, inputs, and outputs unchanged. On the first line, add a Python comment '# THOUGHT: {one-sentence change rationale}'. \n"
         + code
         + "\n"
         + p["inout_inf"]
         + "\nDo not give additional explanations."
     )
+
+
+def eoh_llm_repair(model: Optional[str], parent_code: str, env_name: str = "tsp", n: int = 1, debug: bool = False) -> List[str]:
+    """Memetic-style light repair/simplify pass that preserves I/O and improves stability.
+
+    The model should return ONLY a fenced Python code block for `def phi(state): ...`.
+    The first line should be a comment like '# THOUGHT: {short rationale}'.
+    """
+    guidance = (
+        "Lightly revise the function to: enforce broadcasting to [B,1], replace NaNs via torch.nan_to_num,"
+        " prefer reductions over N-dependent tensors, avoid hard-coded N, scale by graph_scale(), and clamp magnitudes."
+    )
+    p = _phi_prompt_parts(env_name)
+    prompt = (
+        p["task"]
+        + "\nHere is the current function to analyze and revise:\n\n"
+        + parent_code
+        + "\n\n"
+        + guidance
+        + "\nAdd a first line comment '# THOUGHT: {one-sentence change rationale}'. Return ONLY the code."
+    )
+    debug = debug or os.environ.get("LLM_DEBUG", "").lower() in ("1", "true", "yes")
+    return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
 def eoh_llm_e1(model: Optional[str], parents: List[Dict[str, str]], n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:

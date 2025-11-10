@@ -1,18 +1,24 @@
 """
-End-to-end pipeline to automatically search for the best Phi(s) on TSP-50 and optionally start full training.
+EoH-style multi-population search for Phi(state) on TSP-20 with optional full training.
 
 Steps:
-1) Evolutionary search with short POMOPBRS training as fitness
-2) Save the best candidate to a file (phi_best.py)
-3) (Optional) Kick off full training using Hydra run.py with the saved potential
+1) Multi-population evolutionary search (short POMOPBRS training as fitness)
+2) Save best candidate to phi_best.py and dump all candidates with Thought/score/hash
+3) (Optional) Launch full training via Hydra run.py
 
-Example:
-  # Use local Ollama (preferred when available)
-  python examples/auto_find_phi_tsp20.py --ollama-model qwen3:32b --population-size 6 --iterations 3 --train-after \
-      --train-epochs 100 --gpus 1 --batch-size 512
+Examples:
+  # Local Ollama (recommended for EoH replication)
+  python examples/auto_find_phi_tsp20.py \
+    --ollama-model qwen3:32b \
+    --n-pops 4 --pop-size 8 --generations 10 \
+    --operators e1,e2,m1,m2 --operator-weights 1,1,1,1 \
+    --memetic-repair-prob 0.25 --elite-parent-k 2 --archive-top-k 32 \
+    --epochs-per-eval 1 --batch-size 64 --train-size 1000 --val-size 256 \
+    --dump-dir runs/eoh --train-after --train-epochs 100 --gpus 1
 
-  # Or, omit --ollama-model to use DeepSeek API (set DEEPSEEK_API_KEY)
-  DEEPSEEK_API_KEY=sk-... python examples/auto_find_phi_tsp20.py --population-size 6 --iterations 3
+  # DeepSeek API (set DEEPSEEK_API_KEY)
+  DEEPSEEK_API_KEY=sk-... python examples/auto_find_phi_tsp20.py \
+    --n-pops 2 --pop-size 6 --generations 6 --dump-dir runs/eoh
 """
 
 from __future__ import annotations
@@ -27,15 +33,14 @@ from rl4co.heuristic_finder.evosearch import EvoConfig, evolution_search
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    # Evo config (Ollama-only, EoH-enabled)
+    # LLM / Evolution settings (EoH-style)
     p.add_argument("--ollama-model", type=str, default=None, help="Ollama model name, e.g., qwen3:32b")
-    p.add_argument("--frac-crossover", type=float, default=0.5, help="Fraction of offspring generated via crossover (rest via mutation)")
-    p.add_argument("--tournament-k", type=int, default=2, help="Tournament size when picking parents")
-    p.add_argument("--novelty-weight", type=float, default=0.0, help="Add small novelty pressure to survivor selection")
-    p.add_argument("--population-size", type=int, default=4)
-    p.add_argument("--survivors", type=int, default=2)
-    p.add_argument("--iterations", type=int, default=2)
-    p.add_argument("--offspring-per-iter", type=int, default=2)
+    p.add_argument("--n-pops", type=int, default=1, help="# independent populations (EoH ec_n_pop)")
+    p.add_argument("--pop-size", type=int, default=4, help="population size per pop (EoH ec_pop_size)")
+    p.add_argument("--generations", type=int, default=2, help="# evolutionary generations")
+    p.add_argument("--operators", type=str, default="e1,e2,m1,m2", help="comma list of operators")
+    p.add_argument("--operator-weights", type=str, default=None, help="comma list of per-operator probabilities")
+    p.add_argument("--tournament-k", type=int, default=2, help="Tournament size")
     p.add_argument("--epochs-per-eval", type=int, default=1)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--train-size", type=int, default=1000)
@@ -45,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gpu-ids", type=str, default=None, help="Comma-separated GPU ids for parallel short-training, e.g., 0,1,2,3")
 
     # PBRS tuning
-    p.add_argument("--gamma-choices", type=str, default="1.0,-0.1,0.1", help="Comma-separated gamma candidates to scan per phi")
+    p.add_argument("--gamma-choices", type=str, default="1.0,-0.1,0.1", help="Comma-separated gamma candidates to sample for phi")
     p.add_argument("--reward-scale", type=str, default=None, help="Advantage scaling: None|scale|norm")
     p.add_argument("--center-dphi", action="store_true", help="Center Delta-Phi within batch during shaping")
     p.add_argument("--norm-dphi", action="store_true", help="Normalize Delta-Phi std within batch during shaping")
@@ -55,6 +60,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--topk", type=int, default=3, help="Print top-K after search")
     p.add_argument("--dump-dir", type=str, default=None, help="Directory to dump all candidate phi codes per generation")
     p.add_argument("--seed", type=int, default=None, help="Fixed seed for reproducible short-training fitness evaluation")
+
+    # Diversity / archive / memetic
+    p.add_argument("--dedup-global", action="store_true", help="Enable global dedup (default true)")
+    p.add_argument("--no-dedup-global", dest="dedup_global", action="store_false")
+    p.set_defaults(dedup_global=True)
+    p.add_argument("--dedup-within-pop", action="store_true", help="Enable within-pop dedup (default true)")
+    p.add_argument("--no-dedup-within-pop", dest="dedup_within_pop", action="store_false")
+    p.set_defaults(dedup_within_pop=True)
+    p.add_argument("--memetic-repair-prob", type=float, default=0.0, help="Prob. to apply light repair to offspring")
+    p.add_argument("--archive-top-k", type=int, default=8, help="Top-K to keep in elite archive")
+    p.add_argument("--elite-parent-k", type=int, default=0, help="Inject K elites into parent pool")
+    p.add_argument("--elite-replace-worst", type=int, default=0, help="Replace worst K with elites after merge")
 
     # Train after search
     p.add_argument("--train-after", action="store_true")
@@ -80,13 +97,18 @@ def main():
     # parse gamma list
     gamma_choices = [float(x) for x in args.gamma_choices.split(",") if x.strip() != ""] if args.gamma_choices else []
 
+    # Operators and weights
+    ops = [x.strip() for x in args.operators.split(",") if x.strip()]
+    opw = None
+    if args.operator_weights:
+        opw = [float(x) for x in args.operator_weights.split(",") if x.strip()]
+
     # If no Ollama model, evolution falls back to DeepSeek API using DEEPSEEK_API_KEY
 
     cfg = EvoConfig(
-        population_size=args.population_size,
-        survivors=args.survivors,
-        iterations=args.iterations,
-        offspring_per_iter=args.offspring_per_iter,
+        n_pops=args.n_pops,
+        pop_size=args.pop_size,
+        generations=args.generations,
         epochs_per_eval=args.epochs_per_eval,
         batch_size=args.batch_size,
         train_size=args.train_size,
@@ -94,9 +116,9 @@ def main():
         num_starts=args.num_starts,
         device=args.device,
         ollama_model=args.ollama_model,
-        frac_crossover=args.frac_crossover,
         tournament_k=args.tournament_k,
-        novelty_weight=args.novelty_weight,
+        operators=ops,
+        operator_weights=opw,
         gpu_ids=gpu_ids,
         dump_dir=args.dump_dir,
         seed=args.seed,
@@ -104,6 +126,12 @@ def main():
         reward_scale=args.reward_scale,
         center_dphi=bool(args.center_dphi),
         norm_dphi=bool(args.norm_dphi),
+        dedup_global=bool(args.dedup_global),
+        dedup_within_pop=bool(args.dedup_within_pop),
+        memetic_repair_prob=float(args.memetic_repair_prob),
+        archive_top_k=int(args.archive_top_k),
+        elite_parent_k=int(args.elite_parent_k),
+        elite_replace_worst=int(args.elite_replace_worst),
     )
     results = evolution_search(cfg)
 
@@ -124,7 +152,7 @@ def main():
         print(f"{cand.spec.name} [gamma={cand.gamma:+.3f}]: val/reward={score:.4f}")
     # 3) Optional: Start full training via run.py (Hydra)
     if args.train_after:
-        cmd: List[str] = ["python", "run.py", "experiment=routing/pomopbrs-tsp50.yaml"]
+        cmd: List[str] = ["python", "run.py", "experiment=routing/pomopbrs-tsp20.yaml"]
         cmd.append(f"model.potential=file:{save_path}")
         cmd.append(f"trainer.max_epochs={args.train_epochs}")
         cmd.append(f"model.batch_size={args.train_batch_size}")
