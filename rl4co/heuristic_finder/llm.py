@@ -155,8 +155,10 @@ def generate_candidates_via_ollama(
                 except Exception:
                     raw = s
             cleaned = _strip_think_tags(raw)
+            _maybe_dump("ollama_raw", cleaned)
             code = _extract_code_block(cleaned)
             code = _extract_phi_from_text(code if code else cleaned)
+            _maybe_dump("ollama_code_parsed", code, suffix=".py")
 
             # Second-pass repair if not a valid function
             if not _looks_like_phi(code):
@@ -171,10 +173,12 @@ def generate_candidates_via_ollama(
                     if r2_raw is None:
                         r2_raw = str(r2)
                     r2_clean = _strip_think_tags(r2_raw)
+                    _maybe_dump("ollama_repair_raw", r2_clean)
                     r2_code = _extract_code_block(r2_clean)
                     r2_code = _extract_phi_from_text(r2_code if r2_code else r2_clean)
                     if _looks_like_phi(r2_code):
                         code = r2_code
+                        _maybe_dump("ollama_repair_code", code, suffix=".py")
                 except Exception as _:
                     pass
             if debug:
@@ -224,14 +228,24 @@ def generate_candidates_via_deepseek(
         " Do not include explanations. Wrap the code in a fenced block:```python ...```"
     )
 
+    # Allow env overrides for generation parameters
+    try:
+        temperature = float(os.environ.get("DEEPSEEK_TEMPERATURE", "0.3"))
+    except Exception:
+        temperature = 0.3
+    try:
+        max_tokens = int(os.environ.get("DEEPSEEK_MAX_TOKENS", "1024"))
+    except Exception:
+        max_tokens = 1024
+
     payload = {
         "model": model_name,
         "messages": [
             {"role": "system", "content": sys_prompt},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.3,
-        "max_tokens": 1024,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
         "stream": False,
     }
 
@@ -273,6 +287,7 @@ def generate_candidates_via_deepseek(
                 raw = str(data)
 
             cleaned = _strip_think_tags(raw)
+            _maybe_dump("deepseek_stage1_raw" if not expect_code else "deepseek_raw", cleaned)
             if not expect_code:
                 # Reasoner/spec stage: return raw cleaned text (e.g., JSON)
                 if debug:
@@ -280,9 +295,11 @@ def generate_candidates_via_deepseek(
                     print(cleaned, flush=True)
                     print("=" * 80, flush=True)
                 out.append(cleaned)
+                continue
             else:
                 code = _extract_code_block(cleaned)
                 code = _extract_phi_from_text(code if code else cleaned)
+                _maybe_dump("deepseek_code_parsed", code, suffix=".py")
 
                 # Second-pass repair if not a valid function
                 if not _looks_like_phi(code):
@@ -334,10 +351,12 @@ def generate_candidates_via_deepseek(
                             r2_raw = str(d2)
 
                         r2_clean = _strip_think_tags(r2_raw)
+                        _maybe_dump("deepseek_repair_raw", r2_clean)
                         r2_code = _extract_code_block(r2_clean)
                         r2_code = _extract_phi_from_text(r2_code if r2_code else r2_clean)
                         if _looks_like_phi(r2_code):
                             code = r2_code
+                            _maybe_dump("deepseek_repair_code", code, suffix=".py")
                     except Exception as _:
                         pass
                 if debug:
