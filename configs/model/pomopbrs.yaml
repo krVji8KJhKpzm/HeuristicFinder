@@ -1,0 +1,19 @@
+_target_: rl4co.heuristic_finder.builders.build_pomopbrs_model
+
+# Potential function selector:
+# - seed:<name>  e.g., seed:neg_remaining
+# - file:<path>  e.g., file:${paths.root_dir}/phi_mybest.py
+# - raw code     e.g., "def phi(state): ..."
+potential: seed:neg_remaining
+
+# POMO-related knobs
+# If null, use number of available start nodes (e.g., TSP: num_loc)
+num_starts: null
+
+# Training data & optimization (can be overridden by experiment config)
+batch_size: 512
+train_data_size: 200000
+val_data_size: 10000
+test_data_size: 10000
+optimizer_kwargs:
+  lr: 1e-4
