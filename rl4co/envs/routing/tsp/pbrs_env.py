@@ -120,7 +120,13 @@ class TSPStateView:
         dif = locs.unsqueeze(-3) - locs.unsqueeze(-2)  # [B,N,N,2]
         d = torch.linalg.norm(dif, dim=-1, ord=2)  # [B,N,N]
         if normalize:
-            d = d / self.graph_scale().unsqueeze(-1)  # [B,1] -> [B,1,1]
+            # Inline graph-scale: diagonal of bounding box per instance [B,1,1]
+            x = locs[..., 0]
+            y = locs[..., 1]
+            dx = (x.max(dim=-1).values - x.min(dim=-1).values)
+            dy = (y.max(dim=-1).values - y.min(dim=-1).values)
+            scale = torch.sqrt(dx * dx + dy * dy).clamp_min(1e-6).unsqueeze(-1).unsqueeze(-1)
+            d = d / scale
         # ensure exact zeros on diagonal (numerical stability)
         ii = torch.arange(locs.shape[-2], device=locs.device)
         d[..., ii, ii] = 0.0

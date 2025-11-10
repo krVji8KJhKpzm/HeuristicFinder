@@ -96,6 +96,44 @@ def compile_potential(code: str) -> Callable[[TSPStateView], torch.Tensor]:
         if isinstance(node, (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal)):
             raise ValueError("Unsafe statement in potential code")
 
+    # Build parent links (ast does not expose them by default)
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            setattr(child, "parent", parent)
+
+    # Enforce restricted access to state.* helpers: allow only raw N-dependent helpers.
+    # This prevents LLM outputs from using convenience methods you have disabled.
+    allowed_state_calls = {
+        "action_mask",
+        "visited_mask",
+        "unvisited_mask",
+        "current_node_index",
+        "first_node_index",
+        "distance_matrix",
+    }
+
+    def _root_name(attr: ast.AST) -> str:
+        # Walk down Attribute.value until reaching a Name
+        cur = attr
+        while isinstance(cur, ast.Attribute):
+            cur = cur.value  # type: ignore[attr-defined]
+        if isinstance(cur, ast.Name):
+            return cur.id
+        return ""
+
+    # Reject any access like state.xxx that is not explicitly allowed
+    for node in ast.walk(tree):
+        # Check function calls state.xxx(...)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and _root_name(node.func) == "state":
+            if node.func.attr not in allowed_state_calls:
+                raise ValueError(f"Forbidden state helper: state.{node.func.attr}(...) is not allowed")
+        # Check attribute access on state that isn't immediately a call
+        if isinstance(node, ast.Attribute) and _root_name(node) == "state":
+            parent = getattr(node, "parent", None)
+            is_call_func = isinstance(parent, ast.Call) and parent.func is node
+            if (not is_call_func) and node.attr not in allowed_state_calls:
+                raise ValueError(f"Forbidden state attribute access: state.{node.attr} is not allowed")
+
     ns: Dict[str, object] = _safe_exec_namespace()
     exec(compile(tree, filename="<potential>", mode="exec"), ns, ns)
     if "phi" not in ns or not callable(ns["phi"]):

@@ -18,9 +18,10 @@ def format_prompt(env_name: str = "tsp", guidance: str = "") -> str:
         "Goal: robust, node-count-invariant outputs. Use reductions (mean/max/min/std/softmin) over N-dependent tensors.\n"
         "Avoid Python loops; prefer vectorized torch ops.\n"
         "Available state helpers (batch-friendly):\n"
-        "Raw N-dependent (use with reductions): action_mask() -> [B,N] (True=unvisited); visited_mask() -> [B,N];\n"
-        "  current_node_index() -> [B]; first_node_index() -> [B]; distances_from_current(normalize=True) -> [B,N];\n"
+        "Raw N-dependent only (reduce to keep invariance): action_mask() -> [B,N] (True=unvisited); visited_mask() -> [B,N]; unvisited_mask() -> [B,N];\n"
+        "  current_node_index() -> [B]; first_node_index() -> [B];\n"
         "  distance_matrix(normalize=True) -> [B,N,N] (diag=0).\n"
+        "Do NOT use any other state.* helpers (e.g., visited_ratio, remaining_ratio, nearest/centroid/start distances, graph_scale, distances_from_current).\n"
         "Return a tensor broadcastable to [B,1]. Keep it simple and stable.\n"
         + guidance
     )
@@ -130,8 +131,8 @@ def _reasoner_context(env_name: str = "tsp") -> str:
     parts = _phi_prompt_parts(env_name)
     goal = (
         "Design a potential function Phi(state) for PBRS in the given environment.\n"
-        "Constraints: node-count-invariant, use normalized distances, output broadcastable to [B,1],\n"
-        "handle NaNs with torch.nan_to_num, and prefer simple/stable formulations.\n"
+        "Constraints: node-count-invariant, output broadcastable to [B,1], handle NaNs with torch.nan_to_num,\n"
+        "and prefer simple/stable formulations. Use ONLY the listed raw helpers; do not invent extra methods.\n"
     )
     ctx = (
         goal
@@ -508,19 +509,14 @@ def _phi_prompt_parts(env_name: str = "tsp") -> Dict[str, object]:
     func_outputs = ["value"]
     inout_inf = (
         "Input 'state' offers helper methods (batch-friendly):\n"
-        "Progress: remaining_ratio() -> [B,1]; visited_ratio() -> [B,1]; step_ratio() -> [B,1]\n"
-        "Geometry: graph_scale() -> [B,1]; current_loc() -> [B,2]; start_loc() -> [B,2];\n"
-        "  nearest_unvisited_distance(normalize=True) -> [B,1]; k_nearest_unvisited(k=3) -> [B,k]; k_farthest_unvisited(k=3) -> [B,k];\n"
-        "  centroid_unvisited() -> [B,2]; distance_to_centroid(normalize=True) -> [B,1]; distance_to_start(normalize=True) -> [B,1];\n"
-        "  mean_unvisited_distance(normalize=True) -> [B,1]; max_unvisited_distance(normalize=True) -> [B,1]; std_unvisited_distance(normalize=True) -> [B,1]\n"
-        "Raw N-dependent (reduce over them): action_mask() -> [B,N] (True=unvisited); visited_mask() -> [B,N];\n"
-        "  current_node_index() -> [B]; first_node_index() -> [B]; distances_from_current(normalize=True) -> [B,N];\n"
-        "  distance_matrix(normalize=True) -> [B,N,N] (diag=0)."
+        "Raw N-dependent ONLY (reduce over them): action_mask() -> [B,N] (True=unvisited); visited_mask() -> [B,N]; unvisited_mask() -> [B,N];\n"
+        "  current_node_index() -> [B]; first_node_index() -> [B];\n"
+        "  distance_matrix(normalize=True) -> [B,N,N] (diag=0).\n"
+        "Forbidden: visited_ratio, remaining_ratio, step_ratio, current_loc, start_loc, nearest/centroid/start distances, k-nearest/farthest, graph_scale, distances_from_current.\n"
     )
     other_inf = (
         "Constraints: Use only torch ops; do not import; ensure node-count-invariant outputs by reducing over N-dependent tensors;"
-        " normalize distances by graph_scale(); avoid Python loops; ensure outputs are finite and reasonably scaled;"
-        " return ONLY the Python function without any extra text."
+        " avoid Python loops; ensure outputs are finite and reasonably scaled; return ONLY the Python function without any extra text."
     )
     return {
         "task": task,
@@ -703,7 +699,7 @@ def eoh_llm_repair(model: Optional[str], parent_code: str, env_name: str = "tsp"
     """
     guidance = (
         "Lightly revise the function to: enforce broadcasting to [B,1], replace NaNs via torch.nan_to_num,"
-        " prefer reductions over N-dependent tensors, avoid hard-coded N, scale by graph_scale(), and clamp magnitudes."
+        " prefer reductions over N-dependent tensors, avoid hard-coded N, and clamp magnitudes."
     )
     p = _phi_prompt_parts(env_name)
     prompt = (
@@ -795,7 +791,7 @@ def build_eoh_prompt(
         instr = (
             "Operator: CROSSOVER.\n"
             "Merge good ideas from two parents into a single, concise function.\n"
-            "Avoid duplicated work and keep constants well-scaled (use graph_scale).\n"
+            "Avoid duplicated work and keep constants well-scaled.\n"
             "Parent A:\n" + parent_a + "\n\nParent B:\n" + parent_b + "\n"
             "Return ONLY the new function in a fenced code block (```python ... ```), no extra text."
         )
