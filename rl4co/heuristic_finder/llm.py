@@ -79,12 +79,28 @@ def _extract_phi_from_text(text: str) -> str:
             fence = tail.find("```")
             if fence != -1:
                 tail = tail[:fence]
-            # look back for a single-line THOUGHT comment before 'def phi'
+            # look back for THOUGHT or algorithm line before 'def phi'
             prefix = text[:start]
-            tm = re.search(r"(?m)^\s*#\s*THOUGHT:\s*\{[^\n\r]*\}\s*$", prefix)
+            # 1) exact comment form with braces
+            tm = re.search(r"(?mi)^\s*#\s*THOUGHT:\s*\{([^}]*)\}\s*$", prefix)
             if tm:
-                thought_line = prefix[tm.start(): tm.end()].strip()
+                t = tm.group(1).strip()
+                thought_line = f"# THOUGHT: {{{t}}}"
                 return (thought_line + "\n" + tail.strip()).strip()
+            # 2) plain THOUGHT: ... (with or without braces)
+            tm2 = re.search(r"(?mi)^\s*THOUGHT:\s*(\{?)([^\n\r}]*)\}?\s*$", prefix)
+            if tm2:
+                t = tm2.group(2).strip()
+                thought_line = f"# THOUGHT: {{{t}}}"
+                return (thought_line + "\n" + tail.strip()).strip()
+            # 3) fallback: last {...} block in prefix as algorithm
+            br = re.findall(r"\{([^}]*)\}", prefix)
+            if br:
+                t = br[-1].strip()
+                # avoid extremely long captures (likely JSON/specs)
+                if 0 < len(t) <= 400:
+                    thought_line = f"# THOUGHT: {{{t}}}"
+                    return (thought_line + "\n" + tail.strip()).strip()
             return tail.strip()
         # Coarse fallback: from first 'def' to last 'return'
         ms = re.findall(r"def[\s\S]*?return[\s\S]*", text)
@@ -186,8 +202,8 @@ def generate_candidates_via_ollama(
                     raw = s
             cleaned = _strip_think_tags(raw)
             _maybe_dump("ollama_raw", cleaned)
-            code = _extract_code_block(cleaned)
-            code = _extract_phi_from_text(code if code else cleaned)
+            # Extract code while preserving any preceding THOUGHT/algorithm from raw content
+            code = _extract_phi_from_text(cleaned)
             _maybe_dump("ollama_code_parsed", code, suffix=".py")
 
             # Second-pass repair if not a valid function
@@ -204,8 +220,7 @@ def generate_candidates_via_ollama(
                         r2_raw = str(r2)
                     r2_clean = _strip_think_tags(r2_raw)
                     _maybe_dump("ollama_repair_raw", r2_clean)
-                    r2_code = _extract_code_block(r2_clean)
-                    r2_code = _extract_phi_from_text(r2_code if r2_code else r2_clean)
+                    r2_code = _extract_phi_from_text(r2_clean)
                     if _looks_like_phi(r2_code):
                         code = r2_code
                         _maybe_dump("ollama_repair_code", code, suffix=".py")
@@ -327,8 +342,7 @@ def generate_candidates_via_deepseek(
                 out.append(cleaned)
                 continue
             else:
-                code = _extract_code_block(cleaned)
-                code = _extract_phi_from_text(code if code else cleaned)
+                code = _extract_phi_from_text(cleaned)
                 _maybe_dump("deepseek_code_parsed", code, suffix=".py")
 
                 # Second-pass repair if not a valid function
@@ -382,8 +396,7 @@ def generate_candidates_via_deepseek(
 
                         r2_clean = _strip_think_tags(r2_raw)
                         _maybe_dump("deepseek_repair_raw", r2_clean)
-                        r2_code = _extract_code_block(r2_clean)
-                        r2_code = _extract_phi_from_text(r2_code if r2_code else r2_clean)
+                        r2_code = _extract_phi_from_text(r2_clean)
                         if _looks_like_phi(r2_code):
                             code = r2_code
                             _maybe_dump("deepseek_repair_code", code, suffix=".py")
@@ -525,6 +538,15 @@ def _phi_prompt_parts(env_name: str = "tsp") -> Dict[str, object]:
     other_inf = (
         "Constraints: Use only torch ops; do not import; ensure node-count-invariant outputs by reducing over N-dependent tensors;"
         " avoid Python loops; ensure outputs are finite and reasonably scaled; return ONLY the Python function without any extra text."
+        "\nQuality constraints (aim to satisfy):\n"
+        "- Shaping strength should be moderate: target step_shaping_ratio and episode_shaping_ratio in [0.01, 0.20].\n"
+        "- Terminal consistency: for complete trajectories, make \gamma^T·Phi(s_T) - Phi(s_0) close to 0; keep Phi equal across terminal goal states.\n"
+        "- No loop arbitrage: ensure the sum of \gamma·ΔPhi over any loop is bounded and near 0 (no reward farming).\n"
+        "- Positive progress correlation: Phi or ΣΔPhi should correlate positively with final reward/progress/success probability.\n"
+        "- Smoothness: keep |ΔPhi| changes reasonable (e.g., controlled 95th percentile); avoid large jumps between adjacent states.\n"
+        "- Permutation invariance over node indices for combinatorial instances (use reductions like mean/max/min/std/softmin).\n"
+        "- Prefer not to increase reward variance: shaped reward variance should not drastically exceed base reward variance.\n"
+        "If a 'Diagnostics summary' is provided for parents, use it to adjust the design towards these targets (increase correlation, keep ratios within range, reduce terminal Phi variance, and bound |ΔPhi|)."
     )
     return {
         "task": task,
@@ -560,7 +582,10 @@ def _prompt_e1(parents: List[Dict[str, str]], env_name: str = "tsp") -> str:
     for i, ind in enumerate(parents):
         alg = ind.get("algorithm", "(no description)")
         code = ind.get("code", "")
+        diag = ind.get("diagnostics", None)
         prompt_indiv += f"No.{i+1} algorithm and the corresponding code are: \n{alg}\n{code}\n"
+        if diag:
+            prompt_indiv += f"Diagnostics summary: \n{diag}\n"
     return (
         p["task"]
         + "\nI have "
@@ -594,7 +619,10 @@ def _prompt_e2(parents: List[Dict[str, str]], env_name: str = "tsp") -> str:
     for i, ind in enumerate(parents):
         alg = ind.get("algorithm", "(no description)")
         code = ind.get("code", "")
+        diag = ind.get("diagnostics", None)
         prompt_indiv += f"No.{i+1} algorithm and the corresponding code are: \n{alg}\n{code}\n"
+        if diag:
+            prompt_indiv += f"Diagnostics summary: \n{diag}\n"
     return (
         p["task"]
         + "\nI have "
@@ -626,6 +654,7 @@ def _prompt_m1(parent: Dict[str, str], env_name: str = "tsp") -> str:
     p = _phi_prompt_parts(env_name)
     alg = parent.get("algorithm", "(no description)")
     code = parent.get("code", "")
+    diag = parent.get("diagnostics", None)
     return (
         p["task"]
         + "\nI have one algorithm with its code as follows. \n"
@@ -633,7 +662,8 @@ def _prompt_m1(parent: Dict[str, str], env_name: str = "tsp") -> str:
         + alg
         + "\nCode:\n\n"
         + code
-        + "\nPlease assist me in creating a new algorithm that has a different form but can be a modified version of the algorithm provided. \n"
+        + ("\nDiagnostics summary:\n" + diag + "\n" if diag else "\n")
+        + "Please assist me in creating a new algorithm that has a different form but can be a modified version of the algorithm provided. \n"
         + "First, describe your new algorithm and main steps in one sentence, inside a single brace, and place it as the first line Python comment '# THOUGHT: { ... }'.\n"
         + "Next, implement it in Python as a function named "
         + p["func_name"]
@@ -657,6 +687,7 @@ def _prompt_m2(parent: Dict[str, str], env_name: str = "tsp") -> str:
     p = _phi_prompt_parts(env_name)
     alg = parent.get("algorithm", "(no description)")
     code = parent.get("code", "")
+    diag = parent.get("diagnostics", None)
     return (
         p["task"]
         + "\nI have one algorithm with its code as follows. \n"
@@ -664,7 +695,8 @@ def _prompt_m2(parent: Dict[str, str], env_name: str = "tsp") -> str:
         + alg
         + "\nCode:\n\n"
         + code
-        + "\nPlease identify the main algorithm parameters and assist me in creating a new algorithm that has a different parameter settings of the score function provided. \n"
+        + ("\nDiagnostics summary:\n" + diag + "\n" if diag else "\n")
+        + "Please identify the main algorithm parameters and assist me in creating a new algorithm that has a different parameter settings of the score function provided. \n"
         + "First, describe your new algorithm and main steps in one sentence, inside a single brace, and place it as the first line Python comment '# THOUGHT: { ... }'.\n"
         + "Next, implement it in Python as a function named "
         + p["func_name"]
@@ -687,13 +719,14 @@ def _prompt_m2(parent: Dict[str, str], env_name: str = "tsp") -> str:
 def _prompt_m3(parent: Dict[str, str], env_name: str = "tsp") -> str:
     p = _phi_prompt_parts(env_name)
     code = parent.get("code", "")
+    diag = parent.get("diagnostics", None)
     return (
         "First, you need to identify the main components in the function below. "
         "Next, analyze whether any of these components can be overfit to the in-distribution instances. "
         "Then, based on your analysis, simplify the components to enhance the generalization to potential out-of-distribution instances. "
         "Finally, provide the revised code, keeping the function name, inputs, and outputs unchanged. On the first line, add a Python comment '# THOUGHT: {one-sentence change rationale}'. \n"
         + code
-        + "\n"
+        + ("\nDiagnostics summary:\n" + diag + "\n" if diag else "\n")
         + p["inout_inf"]
         + "\nDo not give additional explanations."
     )

@@ -28,8 +28,12 @@ class Candidate:
 
     spec: PotentialSpec
     gamma: float
+    algorithm: Optional[str] = None
     thought: Optional[str] = None
     code_hash: Optional[str] = None
+    # Diagnostics / reflections
+    stats: Optional[Dict[str, float]] = None
+    stats_text: Optional[str] = None
 
 
 @dataclass
@@ -82,6 +86,9 @@ class EvoConfig:
     archive_top_k: int = 8
     elite_parent_k: int = 0
     elite_replace_worst: int = 0
+    # Diagnostics collection for reflection
+    collect_stats: bool = True
+    stats_batch_size: int = 64
 
 
 def compile_candidates(codes: List[str]) -> List[PotentialSpec]:
@@ -131,8 +138,17 @@ def _tournament_select(scored: List[Tuple[Candidate, float]], m: int, k: int) ->
 def _parents_pack(pars: List[Candidate]) -> List[dict]:
     pack = []
     for p in pars:
-        alg = p.thought if (p.thought is not None and len(p.thought) > 0) else "(no description)"
-        pack.append({"algorithm": alg, "code": p.spec.code})
+        alg = None
+        if p.algorithm is not None and len(p.algorithm) > 0:
+            alg = p.algorithm
+        elif p.thought is not None and len(p.thought) > 0:
+            alg = p.thought
+        else:
+            alg = "(no description)"
+        entry = {"algorithm": alg, "code": p.spec.code}
+        if p.stats_text:
+            entry["diagnostics"] = p.stats_text
+        pack.append(entry)
     return pack
 
 
@@ -188,8 +204,9 @@ def _propose_offspring_for_operator(
             for sp in specs:
                 g = _mutate_gamma(_init_gamma(cfg), cfg) if cfg.mutate_gamma else _init_gamma(cfg)
                 th = extract_thought(sp.code) if cfg.enable_thought else None
+                alg = th  # align with EoH: keep a separate 'algorithm' field
                 ch = compute_code_hash(sp.code)
-                out.append(Candidate(spec=sp, gamma=g, thought=th, code_hash=ch))
+                out.append(Candidate(spec=sp, gamma=g, algorithm=alg, thought=th, code_hash=ch))
         except Exception:
             continue
 
@@ -232,12 +249,23 @@ class EliteArchive:
                                 _thought = c.thought if c.thought else extract_thought(c.spec.code)
                             except Exception:
                                 _thought = c.thought
+                            # Ensure algorithm is present (prefer explicit field, then thought, then extraction)
+                            _algorithm = None
+                            if c.algorithm is not None and len(c.algorithm) > 0:
+                                _algorithm = c.algorithm
+                            else:
+                                _algorithm = _thought if _thought else extract_thought(c.spec.code)
+                            _stats = c.stats if c.stats is not None else None
+                            _stats_text = c.stats_text if c.stats_text is not None else None
                             rec = {
                                 "score": float(s),
                                 "gamma": float(c.gamma),
+                                "algorithm": _algorithm,
                                 "thought": _thought,
                                 "code_hash": c.code_hash or compute_code_hash(c.spec.code),
                                 "code": c.spec.code,
+                                "stats": _stats,
+                                "stats_text": _stats_text,
                             }
                             import json as _json
 
@@ -251,7 +279,12 @@ class EliteArchive:
         sel = self.entries[: min(k, len(self.entries))]
         pack = []
         for c, _ in sel:
-            alg = c.thought if (c.thought is not None and len(c.thought) > 0) else "(no description)"
+            if c.algorithm is not None and len(c.algorithm) > 0:
+                alg = c.algorithm
+            elif c.thought is not None and len(c.thought) > 0:
+                alg = c.thought
+            else:
+                alg = "(no description)"
             pack.append({"algorithm": alg, "code": c.spec.code})
         return pack
 
@@ -259,6 +292,7 @@ class EliteArchive:
 # ---------------- Diversity & Thought helpers -----------------
 import ast
 import hashlib
+import math
 
 
 def _ast_signature(code: str) -> str:
@@ -296,6 +330,199 @@ def extract_thought(code: str) -> Optional[str]:
     except Exception:
         return None
     return None
+
+
+def _pearsonr(x, y) -> Optional[float]:
+    try:
+        import torch
+        x = torch.as_tensor(x, dtype=torch.float32)
+        y = torch.as_tensor(y, dtype=torch.float32)
+        if x.numel() < 2 or y.numel() < 2:
+            return None
+        x = x.flatten()
+        y = y.flatten()
+        xm = x - x.mean()
+        ym = y - y.mean()
+        xs = xm.std(unbiased=False)
+        ys = ym.std(unbiased=False)
+        if xs.item() == 0 or ys.item() == 0:
+            return None
+        r = (xm * ym).mean() / (xs * ys)
+        return float(r.item())
+    except Exception:
+        return None
+
+
+def _spearmanr(x, y) -> Optional[float]:
+    try:
+        import torch
+        x = torch.as_tensor(x, dtype=torch.float32).flatten()
+        y = torch.as_tensor(y, dtype=torch.float32).flatten()
+        if x.numel() < 2 or y.numel() < 2:
+            return None
+        # ranks via argsort twice
+        def _ranks(v):
+            idx = torch.argsort(v, stable=True)
+            ranks = torch.empty_like(idx, dtype=torch.float32)
+            ranks[idx] = torch.arange(1, v.numel() + 1, dtype=torch.float32, device=v.device)
+            return ranks
+        rx = _ranks(x)
+        ry = _ranks(y)
+        return _pearsonr(rx, ry)
+    except Exception:
+        return None
+
+
+def _summarize_stats(stats: Dict[str, float]) -> str:
+    keys = [
+        "corr_phi0_final_reward",
+        "spr_phi0_final_reward",
+        "corr_sum_dphi_final_reward",
+        "spr_sum_dphi_final_reward",
+        "gamma_T_phiT_minus_phi0_mean",
+        "gamma_T_phiT_minus_phi0_std",
+        "step_shaping_ratio",
+        "episode_shaping_ratio",
+        "var_ratio_shaped_vs_base",
+        "abs_dphi_q95",
+        "terminal_phi_var",
+    ]
+    parts = []
+    for k in keys:
+        if k in stats and stats[k] is not None:
+            try:
+                parts.append(f"{k}={float(stats[k]):.4g}")
+            except Exception:
+                parts.append(f"{k}={stats[k]}")
+    return "; ".join(parts)
+
+
+def _compute_phi_stats(spec: PotentialSpec, gamma: float, batch_size: int = 64, device: str = "cpu") -> Dict[str, float]:
+    """Collect quick diagnostics for Phi on a sampled batch.
+
+    Returns a flat dict with scalar metrics suitable for JSON.
+    """
+    import torch
+    from rl4co.envs.routing.tsp.env import TSPEnv, TSPGenerator
+    from rl4co.envs.routing.tsp.pbrs_env import DensePBRSTSPEnv
+    from rl4co.models.zoo.pomo import POMO
+    import os as _os
+
+    try:
+        num_loc = int(_os.environ.get("TSP_NUM_LOC", "50"))
+    except Exception:
+        num_loc = 50
+    gen = TSPGenerator(num_loc=num_loc)
+    base_env = TSPEnv(generator=gen)
+    td0 = base_env.reset(base_env.generator(batch_size=[batch_size]).to(device))
+    model = POMO(env=base_env)
+    model.eval()
+    with torch.no_grad():
+        out = model.policy(td0, base_env, phase="val", return_actions=True, decode_type="greedy")
+        actions = out["actions"]  # [B, T]
+        base_final = base_env.get_reward(td0, actions)  # [B]
+
+    pbrs_env = DensePBRSTSPEnv(potential_fn=spec.fn, generator=gen, gamma=gamma)
+    td = pbrs_env.reset(td0.clone())
+    B, T = actions.shape
+    phis_b = []  # [B]
+    dphis = []  # [B]
+    shaped_steps = []  # [B]
+    base_steps = []  # [B]
+    phi_after_last = None
+    phi_init = None
+
+    for t in range(T):
+        sv_before = pbrs_env._build_state_view(td)
+        phi_before = pbrs_env._safe_phi(sv_before).squeeze(-1)
+        if phi_init is None:
+            phi_init = phi_before
+        td.set("action", actions[:, t])
+        td_next = pbrs_env.step(td)["next"]
+        sv_after = pbrs_env._build_state_view(td_next)
+        phi_after = pbrs_env._safe_phi(sv_after).squeeze(-1)
+        shaped = td_next["reward"].squeeze(-1)
+        base = shaped - float(gamma) * (phi_after - phi_before)
+        phis_b.append(phi_before)
+        dphis.append(phi_after - phi_before)
+        shaped_steps.append(shaped)
+        base_steps.append(base)
+        td = td_next
+        phi_after_last = phi_after
+        if td["done"].all():
+            break
+
+    # Stack
+    phis_b = torch.stack(phis_b, dim=1)  # [B, t]
+    dphis = torch.stack(dphis, dim=1)  # [B, t]
+    shaped_steps = torch.stack(shaped_steps, dim=1)
+    base_steps = torch.stack(base_steps, dim=1)
+
+    # Episode-level stats
+    sum_dphi = dphis.sum(dim=1)  # [B]
+    # Correlations
+    corr_phi0 = _pearsonr(phis_b[:, 0], base_final)
+    spr_phi0 = _spearmanr(phis_b[:, 0], base_final)
+    corr_sum_dphi = _pearsonr(sum_dphi, base_final)
+    spr_sum_dphi = _spearmanr(sum_dphi, base_final)
+
+    # gamma^T Phi(s_T) - Phi(s_0)
+    T_eff = dphis.shape[1]
+    try:
+        gT = float(gamma) ** float(T_eff)
+    except Exception:
+        gT = 0.0
+    term_minus_start = gT * phi_after_last - (phi_init if phi_init is not None else 0.0)
+    tms_mean = float(term_minus_start.mean().item()) if isinstance(term_minus_start, torch.Tensor) else float(term_minus_start)
+    tms_std = float(term_minus_start.std(unbiased=False).item()) if isinstance(term_minus_start, torch.Tensor) else 0.0
+
+    # Variance ratios
+    base_var = float(base_steps.flatten().var(unbiased=False).item()) if base_steps.numel() > 1 else 0.0
+    shaped_var = float(shaped_steps.flatten().var(unbiased=False).item()) if shaped_steps.numel() > 1 else 0.0
+    var_ratio = shaped_var / base_var if base_var > 0 else math.inf
+
+    # Magnitudes
+    mean_abs_base = float(base_steps.abs().mean().item()) if base_steps.numel() > 0 else 0.0
+    mean_abs_dphi = float(dphis.abs().mean().item()) if dphis.numel() > 0 else 0.0
+    step_shaping_ratio = (abs(float(gamma)) * mean_abs_dphi / mean_abs_base) if mean_abs_base > 0 else math.inf
+    # Episode ratio vs final reward magnitude
+    mean_abs_sum_dphi = float(sum_dphi.abs().mean().item())
+    mean_abs_final = float(base_final.abs().mean().item()) if base_final.numel() > 0 else 0.0
+    episode_shaping_ratio = (abs(float(gamma)) * mean_abs_sum_dphi / mean_abs_final) if mean_abs_final > 0 else math.inf
+
+    # Bounds and smoothness
+    abs_dphi = dphis.abs()
+    q95 = float(torch.quantile(abs_dphi.flatten(), torch.tensor(0.95, device=abs_dphi.device)).item()) if abs_dphi.numel() > 0 else 0.0
+    term_phi_var = float(phi_after_last.var(unbiased=False).item()) if isinstance(phi_after_last, torch.Tensor) and phi_after_last.numel() > 1 else 0.0
+
+    return {
+        "corr_phi0_final_reward": corr_phi0,
+        "spr_phi0_final_reward": spr_phi0,
+        "corr_sum_dphi_final_reward": corr_sum_dphi,
+        "spr_sum_dphi_final_reward": spr_sum_dphi,
+        "gamma_T_phiT_minus_phi0_mean": tms_mean,
+        "gamma_T_phiT_minus_phi0_std": tms_std,
+        "var_ratio_shaped_vs_base": var_ratio,
+        "step_shaping_ratio": step_shaping_ratio,
+        "episode_shaping_ratio": episode_shaping_ratio,
+        "abs_dphi_q95": q95,
+        "terminal_phi_var": term_phi_var,
+    }
+
+
+def _ensure_stats_for(results: List[Tuple[Candidate, float]], cfg: EvoConfig) -> None:
+    if not cfg.collect_stats:
+        return
+    for cand, _ in results:
+        if cand.stats is not None:
+            continue
+        try:
+            stats = _compute_phi_stats(cand.spec, cand.gamma, batch_size=cfg.stats_batch_size, device=cfg.device)
+            cand.stats = stats
+            cand.stats_text = _summarize_stats(stats)
+        except Exception:
+            cand.stats = None
+            cand.stats_text = None
 
 
 def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
@@ -341,11 +568,12 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
                 continue
             seen_pop.add(h)
             seen_global.add(h)
-            init_cands.append(Candidate(spec=s, gamma=_init_gamma(cfg), thought=th, code_hash=h))
+            init_cands.append(Candidate(spec=s, gamma=_init_gamma(cfg), algorithm=th, thought=th, code_hash=h))
         # Evaluate and keep top-N
         scored_init = _evaluate_population(init_cands, cfg)
         scored_init.sort(key=lambda x: x[1], reverse=True)
         scored_init = scored_init[:pop_size]
+        _ensure_stats_for(scored_init, cfg)
         populations.append(scored_init)
         archive.update(scored_init)
         if cfg.dump_dir:
@@ -370,6 +598,7 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
                                 Candidate(
                                     spec=PotentialSpec(name="elite", code=e["code"], fn=fn),
                                     gamma=_init_gamma(cfg),
+                                    algorithm=th,
                                     thought=th,
                                     code_hash=ch,
                                 ),
@@ -409,6 +638,7 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
                 scored.extend(off_results)
                 scored.sort(key=lambda x: x[1], reverse=True)
                 scored = scored[:pop_size]
+                _ensure_stats_for(scored, cfg)
                 # Optional elite replacement of worst
                 if cfg.elite_replace_worst > 0 and len(archive.entries) > 0:
                     k = min(cfg.elite_replace_worst, len(scored), len(archive.entries))
@@ -545,6 +775,9 @@ def _dump_candidates(dump_dir: str, results: List[Tuple[Candidate, float]], gen_
         path = os.path.join(dump_dir, base)
         try:
             thought = cand.thought if cand.thought else extract_thought(cand.spec.code)
+            algorithm = cand.algorithm if cand.algorithm else thought
+            if not thought and algorithm:
+                thought = algorithm
             code_hash = cand.code_hash if cand.code_hash else compute_code_hash(cand.spec.code)
             with open(path, "w", encoding="utf-8") as f:
                 f.write(f"# score={float(score):.6f}\n")
@@ -555,6 +788,8 @@ def _dump_candidates(dump_dir: str, results: List[Tuple[Candidate, float]], gen_
                         pass
                 if code_hash:
                     f.write(f"# code_hash={code_hash}\n")
+                if cand.stats_text:
+                    f.write(f"# stats: {cand.stats_text}\n")
                 if thought:
                     # keep the one-sentence idea; ensure braces for consistency
                     if not (thought.startswith("{") and thought.endswith("}")):
@@ -574,7 +809,10 @@ def _dump_candidates(dump_dir: str, results: List[Tuple[Candidate, float]], gen_
                     "score": float(score),
                     "gamma": float(cand.gamma),
                     "code_hash": code_hash,
+                    "algorithm": algorithm,
                     "thought": thought,
+                    "stats": cand.stats if cand.stats is not None else None,
+                    "stats_text": cand.stats_text if cand.stats_text is not None else None,
                 }
                 with open(manifest_path, "a", encoding="utf-8") as mf:
                     mf.write(_json.dumps(rec, ensure_ascii=False) + "\n")
