@@ -62,23 +62,31 @@ def _extract_code_block(text: str) -> str:
 
 
 def _extract_phi_from_text(text: str) -> str:
-    """Robust fallback: extract a `def phi(...):` function from mixed text.
+    """Extract the phi function and preserve an optional preceding THOUGHT comment line.
 
     Strategy:
-    1) Find the first occurrence of `def phi(` and return until the next triple backticks or end of text.
-    2) If not found, fallback to a broad 'def ... return' span similar to EoH.
+    - Find the first occurrence of `def phi(`. If found, slice from there to the end of the code block (or text end).
+    - If a line like `# THOUGHT: { ... }` appears immediately before the function, preserve it above the function.
+    - If not found, fallback to a coarse 'def ... return' capture.
     """
     try:
         import re
         m = re.search(r"def\s+phi\s*\(.*?\):", text, flags=re.IGNORECASE | re.DOTALL)
         if m:
-            tail = text[m.start():]
+            start = m.start()
+            tail = text[start:]
             # cut at next fenced block end if present
             fence = tail.find("```")
             if fence != -1:
                 tail = tail[:fence]
+            # look back for a single-line THOUGHT comment before 'def phi'
+            prefix = text[:start]
+            tm = re.search(r"(?m)^\s*#\s*THOUGHT:\s*\{[^\n\r]*\}\s*$", prefix)
+            if tm:
+                thought_line = prefix[tm.start(): tm.end()].strip()
+                return (thought_line + "\n" + tail.strip()).strip()
             return tail.strip()
-        # EoH-like coarse capture: from first 'def' to last 'return'
+        # Coarse fallback: from first 'def' to last 'return'
         ms = re.findall(r"def[\s\S]*?return[\s\S]*", text)
         if ms:
             return ms[0].strip()
