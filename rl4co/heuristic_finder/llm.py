@@ -20,7 +20,7 @@ def format_prompt(env_name: str = "tsp", guidance: str = "") -> str:
         "Available state helpers (batch-friendly):\n"
         "Raw N-dependent only (reduce to keep invariance): action_mask() -> [B,N] (True=unvisited); visited_mask() -> [B,N]; unvisited_mask() -> [B,N];\n"
         "  current_node_index() -> [B]; first_node_index() -> [B];\n"
-        "  distance_matrix(normalize=True) -> [B,N,N] (diag=0).\n"
+        "  distance_matrix() -> [B,N,N] (diag=0).\n"
         "Do NOT use any other state.* helpers (e.g., visited_ratio, remaining_ratio, nearest/centroid/start distances, graph_scale, distances_from_current).\n"
         "Return a tensor broadcastable to [B,1]. Keep it simple and stable.\n"
         + guidance
@@ -62,23 +62,30 @@ def _extract_code_block(text: str) -> str:
 
 
 def _extract_phi_from_text(text: str) -> str:
-    """Robust fallback: extract a `def phi(...):` function from mixed text.
-
+    """Extract the phi function and preserve an optional preceding THOUGHT comment line.
     Strategy:
-    1) Find the first occurrence of `def phi(` and return until the next triple backticks or end of text.
-    2) If not found, fallback to a broad 'def ... return' span similar to EoH.
+    - Find the first occurrence of `def phi(`. If found, slice from there to the end of the code block (or text end).
+    - If a line like `# THOUGHT: { ... }` appears immediately before the function, preserve it above the function.
+    - If not found, fallback to a coarse 'def ... return' capture.
     """
     try:
         import re
         m = re.search(r"def\s+phi\s*\(.*?\):", text, flags=re.IGNORECASE | re.DOTALL)
         if m:
-            tail = text[m.start():]
+            start = m.start()
+            tail = text[start:]
             # cut at next fenced block end if present
             fence = tail.find("```")
             if fence != -1:
                 tail = tail[:fence]
+            # look back for a single-line THOUGHT comment before 'def phi'
+            prefix = text[:start]
+            tm = re.search(r"(?m)^\s*#\s*THOUGHT:\s*\{[^\n\r]*\}\s*$", prefix)
+            if tm:
+                thought_line = prefix[tm.start(): tm.end()].strip()
+                return (thought_line + "\n" + tail.strip()).strip()
             return tail.strip()
-        # EoH-like coarse capture: from first 'def' to last 'return'
+        # Coarse fallback: from first 'def' to last 'return'
         ms = re.findall(r"def[\s\S]*?return[\s\S]*", text)
         if ms:
             return ms[0].strip()
@@ -119,7 +126,7 @@ def _build_repair_instruction(raw: str) -> str:
         "Convert the following content into ONLY a Python fenced code block implementing a single function '\n"
         "def phi(state):\n' using torch ops. Requirements:\n"
         "- Return ONLY one fenced block: ```python ... ``` with no extra text.\n"
-        "- Use provided state helpers conceptually referenced; distances with normalize=True.\n"
+        "- Use provided state helpers conceptually referenced.\n"
         "- Output must be broadcastable to [B,1]; handle NaNs via torch.nan_to_num.\n"
         "- Keep it stable and node-count-invariant.\n"
         "Content begins:\n" + raw + "\nContent ends."
@@ -511,9 +518,9 @@ def _phi_prompt_parts(env_name: str = "tsp") -> Dict[str, object]:
         "Input 'state' offers helper methods (batch-friendly):\n"
         "Raw N-dependent ONLY (reduce over them): action_mask() -> [B,N] (True=unvisited); visited_mask() -> [B,N]; unvisited_mask() -> [B,N];\n"
         "  current_node_index() -> [B]; first_node_index() -> [B];\n"
-        "  distance_matrix(normalize=True) -> [B,N,N] (diag=0).\n"
-        "Forbidden: visited_ratio, remaining_ratio, step_ratio, current_loc, start_loc, nearest/centroid/start distances, k-nearest/farthest, graph_scale, distances_from_current.\n"
+        "  distance_matrix() -> [B,N,N] (diag=0).\n"
     )
+    # "Forbidden: visited_ratio, remaining_ratio, step_ratio, current_loc, start_loc, nearest/centroid/start distances, k-nearest/farthest, graph_scale, distances_from_current.\n"
     other_inf = (
         "Constraints: Use only torch ops; do not import; ensure node-count-invariant outputs by reducing over N-dependent tensors;"
         " avoid Python loops; ensure outputs are finite and reasonably scaled; return ONLY the Python function without any extra text."

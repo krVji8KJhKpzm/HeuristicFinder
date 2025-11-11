@@ -18,7 +18,8 @@ export DEEPSEEK_TEMPERATURE="${DEEPSEEK_TEMPERATURE:-0.0}"
 # Controls the TSP size used during short-training fitness (train_fitness_phi_on_tsp20).
 # Default to 20 to match TSP-20; change to 50, 100, etc. as needed.
 export TSP_NUM_LOC="${TSP_NUM_LOC:-20}"
-export LLM_DEBUG="1"
+export LLM_DEBUG=1
+export LLM_DUMP_DIR="runs/llm_debug"
 
 # ===== Evolution settings (EoH-style) =====
 N_POPS=${N_POPS:-4}
@@ -31,9 +32,9 @@ TOURNAMENT_K=${TOURNAMENT_K:-2}
 # Short-training fitness budgets
 EPOCHS_PER_EVAL=${EPOCHS_PER_EVAL:-1}
 BATCH_SIZE=${BATCH_SIZE:-64}
-TRAIN_SIZE=${TRAIN_SIZE:-1000}
-VAL_SIZE=${VAL_SIZE:-256}
-NUM_STARTS=${NUM_STARTS:-8}
+TRAIN_SIZE=${TRAIN_SIZE:-100000}
+VAL_SIZE=${VAL_SIZE:-1000}
+NUM_STARTS=${NUM_STARTS:-20}
 
 # PBRS shaping toggles
 GAMMA_CHOICES=${GAMMA_CHOICES:-"1.0,-0.1,0.1"}

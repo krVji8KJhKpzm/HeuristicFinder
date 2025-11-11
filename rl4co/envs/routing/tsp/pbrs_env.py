@@ -111,22 +111,12 @@ class TSPStateView:
     #         d = d / self.graph_scale()
     #     return d
 
-    def distance_matrix(self, normalize: bool = True) -> torch.Tensor:
+    def distance_matrix(self) -> torch.Tensor:
         """Full pairwise distance matrix [batch, N, N]. Diagonal is 0.
-
-        When `normalize=True`, divide by `graph_scale()` per instance.
         """
         locs = self.locs  # [B,N,2]
         dif = locs.unsqueeze(-3) - locs.unsqueeze(-2)  # [B,N,N,2]
         d = torch.linalg.norm(dif, dim=-1, ord=2)  # [B,N,N]
-        if normalize:
-            # Inline graph-scale: diagonal of bounding box per instance [B,1,1]
-            x = locs[..., 0]
-            y = locs[..., 1]
-            dx = (x.max(dim=-1).values - x.min(dim=-1).values)
-            dy = (y.max(dim=-1).values - y.min(dim=-1).values)
-            scale = torch.sqrt(dx * dx + dy * dy).clamp_min(1e-6).unsqueeze(-1).unsqueeze(-1)
-            d = d / scale
         # ensure exact zeros on diagonal (numerical stability)
         ii = torch.arange(locs.shape[-2], device=locs.device)
         d[..., ii, ii] = 0.0
@@ -397,5 +387,5 @@ class InvariantTSPStateView:
     # def distances_from_current(self, normalize: bool = True) -> torch.Tensor:
     #     return self._base.distances_from_current(normalize=normalize)
 
-    def distance_matrix(self, normalize: bool = True) -> torch.Tensor:
-        return self._base.distance_matrix(normalize=normalize)
+    def distance_matrix(self) -> torch.Tensor:
+        return self._base.distance_matrix()
