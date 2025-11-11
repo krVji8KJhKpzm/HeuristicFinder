@@ -12,7 +12,8 @@ def format_prompt(env_name: str = "tsp", guidance: str = "") -> str:
         f"combinatorial optimization env '{env_name}'.\n"
         "Output format (strict):\n"
         "- Return ONLY a single fenced code block starting with: ```python and ending with: ```\n"
-        "- The code must define exactly one function: def phi(state): and nothing else.\n"
+        "- Inside the code block, the FIRST line must be: # THOUGHT: {one-sentence idea}.\n"
+        "- Then define exactly one function: def phi(state): and nothing else.\n"
         "- Use only torch ops; no prints, no explanations, no comments outside code.\n"
         "- Ensure result is broadcastable to [B,1]; handle NaNs via torch.nan_to_num.\n"
         "Goal: robust, node-count-invariant outputs. Use reductions (mean/max/min/std/softmin) over N-dependent tensors.\n"
@@ -138,6 +139,26 @@ def _looks_like_phi(code: Optional[str]) -> bool:
     return ("def phi(" in s) and ("return" in s)
 
 
+def _ensure_thought_line(code: Optional[str], default: str = "auto") -> str:
+    """Ensure the first non-empty line is a THOUGHT comment.
+
+    If missing, prepend "# THOUGHT: {default}" followed by a newline.
+    """
+    if not isinstance(code, str):
+        return ""
+    lines = code.splitlines()
+    # find first non-empty line index
+    idx = 0
+    while idx < len(lines) and lines[idx].strip() == "":
+        idx += 1
+    if idx < len(lines):
+        first = lines[idx].lstrip()
+        if first.lower().startswith("# thought:"):
+            return code
+    prefix = f"# THOUGHT: {{{default}}}\n"
+    return prefix + code.lstrip("\n")
+
+
 def _build_repair_instruction(raw: str) -> str:
     return (
         "Convert the following content into ONLY a Python fenced code block implementing a single function '\n"
@@ -204,6 +225,7 @@ def generate_candidates_via_ollama(
             _maybe_dump("ollama_raw", cleaned)
             # Extract code while preserving any preceding THOUGHT/algorithm from raw content
             code = _extract_phi_from_text(cleaned)
+            code = _ensure_thought_line(code)
             _maybe_dump("ollama_code_parsed", code, suffix=".py")
 
             # Second-pass repair if not a valid function
@@ -221,6 +243,7 @@ def generate_candidates_via_ollama(
                     r2_clean = _strip_think_tags(r2_raw)
                     _maybe_dump("ollama_repair_raw", r2_clean)
                     r2_code = _extract_phi_from_text(r2_clean)
+                    r2_code = _ensure_thought_line(r2_code)
                     if _looks_like_phi(r2_code):
                         code = r2_code
                         _maybe_dump("ollama_repair_code", code, suffix=".py")
@@ -268,9 +291,10 @@ def generate_candidates_via_deepseek(
 
     # System prompt (overridable): default enforces code-only
     sys_prompt = system_prompt or (
-        "You are a code generator. Return ONLY Python code for a single"
-        " function 'def phi(state):' using torch ops, broadcastable to [B,1]."
-        " Do not include explanations. Wrap the code in a fenced block:```python ...```"
+        "You are a code generator. Return ONLY one fenced Python code block."
+        " The FIRST line inside must be a single comment: '# THOUGHT: {one-sentence idea}'."
+        " Then define exactly one function 'def phi(state):' using torch ops, broadcastable to [B,1]."
+        " Do not include explanations outside the code block."
     )
 
     # Allow env overrides for generation parameters
@@ -343,6 +367,7 @@ def generate_candidates_via_deepseek(
                 continue
             else:
                 code = _extract_phi_from_text(cleaned)
+                code = _ensure_thought_line(code)
                 _maybe_dump("deepseek_code_parsed", code, suffix=".py")
 
                 # Second-pass repair if not a valid function
@@ -397,6 +422,7 @@ def generate_candidates_via_deepseek(
                         r2_clean = _strip_think_tags(r2_raw)
                         _maybe_dump("deepseek_repair_raw", r2_clean)
                         r2_code = _extract_phi_from_text(r2_clean)
+                        r2_code = _ensure_thought_line(r2_code)
                         if _looks_like_phi(r2_code):
                             code = r2_code
                             _maybe_dump("deepseek_repair_code", code, suffix=".py")
@@ -537,7 +563,9 @@ def _phi_prompt_parts(env_name: str = "tsp") -> Dict[str, object]:
     # "Forbidden: visited_ratio, remaining_ratio, step_ratio, current_loc, start_loc, nearest/centroid/start distances, k-nearest/farthest, graph_scale, distances_from_current.\n"
     other_inf = (
         "Constraints: Use only torch ops; do not import; ensure node-count-invariant outputs by reducing over N-dependent tensors;"
-        " avoid Python loops; ensure outputs are finite and reasonably scaled; return ONLY the Python function without any extra text."
+        " avoid Python loops; ensure outputs are finite and reasonably scaled."
+        " Return ONLY one fenced Python code block: the FIRST line is '# THOUGHT: {one-sentence idea}',"
+        " followed by exactly one function 'def phi(state):'. No extra text outside the code block."
         "\nQuality constraints (aim to satisfy):\n"
         "- Shaping strength should be moderate: target step_shaping_ratio and episode_shaping_ratio in [0.01, 0.20].\n"
         "- Terminal consistency: for complete trajectories, make \gamma^T·Phi(s_T) - Phi(s_0) close to 0; keep Phi equal across terminal goal states.\n"
