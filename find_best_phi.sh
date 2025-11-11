@@ -18,12 +18,12 @@ export DEEPSEEK_TEMPERATURE="${DEEPSEEK_TEMPERATURE:-0.0}"
 # Controls the TSP size used during short-training fitness (train_fitness_phi_on_tsp20).
 # Default to 20 to match TSP-20; change to 50, 100, etc. as needed.
 export TSP_NUM_LOC="${TSP_NUM_LOC:-20}"
-export LLM_DEBUG=1
-export LLM_DUMP_DIR="runs/llm_debug"
+export LLM_DEBUG=0
+export LLM_DUMP_DIR=""
 
 # ===== Evolution settings (EoH-style) =====
-N_POPS=${N_POPS:-4}
-POP_SIZE=${POP_SIZE:-10}
+N_POPS=${N_POPS:-2}
+POP_SIZE=${POP_SIZE:-5}
 GENERATIONS=${GENERATIONS:-10}
 OPERATORS=${OPERATORS:-e1,e2,m1,m2}
 OP_WEIGHTS=${OP_WEIGHTS:-1,1,1,1}
@@ -31,8 +31,8 @@ TOURNAMENT_K=${TOURNAMENT_K:-2}
 
 # Short-training fitness budgets
 EPOCHS_PER_EVAL=${EPOCHS_PER_EVAL:-1}
-BATCH_SIZE=${BATCH_SIZE:-64}
-TRAIN_SIZE=${TRAIN_SIZE:-100000}
+BATCH_SIZE=${BATCH_SIZE:-512}
+TRAIN_SIZE=${TRAIN_SIZE:-10000}
 VAL_SIZE=${VAL_SIZE:-1000}
 NUM_STARTS=${NUM_STARTS:-20}
 
@@ -53,7 +53,7 @@ DUMP_DIR=${DUMP_DIR:-runs/eoh}
 SAVE_PATH=${SAVE_PATH:-phi_best.py}
 TOPK=${TOPK:-5}
 SEED=${SEED:-1234}
-GPU_IDS=${GPU_IDS:-0,1,2,3,4,5,6,7}        # e.g., "0,1,2,3" for parallel short-training; leave empty for CPU
+GPU_IDS=${GPU_IDS:-0,1,2,3,4,5}        # e.g., "0,1,2,3" for parallel short-training; leave empty for CPU
 
 # Build command (no Ollama flags; we use DeepSeek API via env)
 cmd=(python examples/auto_find_phi_tsp20.py
