@@ -63,6 +63,7 @@ def _extract_code_block(text: str) -> str:
 
 def _extract_phi_from_text(text: str) -> str:
     """Extract the phi function and preserve an optional preceding THOUGHT comment line.
+
     Strategy:
     - Find the first occurrence of `def phi(`. If found, slice from there to the end of the code block (or text end).
     - If a line like `# THOUGHT: { ... }` appears immediately before the function, preserve it above the function.

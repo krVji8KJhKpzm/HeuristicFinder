@@ -227,10 +227,15 @@ class EliteArchive:
                 try:
                     with open(self.dump_path, "a", encoding="utf-8") as f:
                         for c, s in scored:
+                            # Ensure thought is populated; fall back to extracting from code
+                            try:
+                                _thought = c.thought if c.thought else extract_thought(c.spec.code)
+                            except Exception:
+                                _thought = c.thought
                             rec = {
                                 "score": float(s),
                                 "gamma": float(c.gamma),
-                                "thought": c.thought,
+                                "thought": _thought,
                                 "code_hash": c.code_hash or compute_code_hash(c.spec.code),
                                 "code": c.spec.code,
                             }
@@ -276,9 +281,18 @@ def compute_code_hash(code: str) -> str:
 
 def extract_thought(code: str) -> Optional[str]:
     try:
+        # Prefer brace-wrapped form: # THOUGHT: { ... }
         m = re.search(r"^\s*#\s*THOUGHT:\s*\{([^}]*)\}\s*$", code, flags=re.IGNORECASE | re.MULTILINE)
         if m:
             return m.group(1).strip()
+        # Fallback: accept a plain line without braces: # THOUGHT: ...
+        m2 = re.search(r"^\s*#\s*THOUGHT:\s*(.+?)\s*$", code, flags=re.IGNORECASE | re.MULTILINE)
+        if m2:
+            txt = m2.group(1).strip()
+            # Strip surrounding braces if present
+            if txt.startswith("{") and txt.endswith("}"):
+                txt = txt[1:-1].strip()
+            return txt
     except Exception:
         return None
     return None
