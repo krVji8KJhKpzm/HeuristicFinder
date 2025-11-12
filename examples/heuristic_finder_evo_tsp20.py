@@ -1,6 +1,6 @@
 """
 EoH-style Phi(s) search example on TSP-20 using short POMOPBRS training as fitness.
-If Ollama is available, use it to generate candidates; otherwise falls back to DeepSeek API.
+If Ollama is available, use it to generate candidates; otherwise falls back to the DeepSeek or Kimi API.
 """
 
 from rl4co.heuristic_finder.evosearch import EvoConfig, evolution_search
@@ -36,4 +36,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

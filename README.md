@@ -161,8 +161,24 @@ trainer = RL4COTrainer(max_epochs=10, accelerator="gpu", precision="16-mixed")
 trainer.fit(model)
 ```
 
-Other examples can be found on our [documentation](https://rl4co.ai4co.org/examples/1-quickstart/)!
+Other examples can be found on our [documentation](https://rl4co.ai4co.org/examples/1-quickstart/)! 
 
+
+### Remote LLM APIs (DeepSeek / Kimi)
+
+Heuristic search utilities can call remote OpenAI-compatible LLMs. By default they prefer DeepSeek when `DEEPSEEK_API_KEY` is set, but you can target Kimi's `kimi-k2-thinking` model by setting `KIMI_API_KEY` and `LLM_API_PROVIDER=kimi`.
+
+| Env | Purpose |
+| --- | ------- |
+| `LLM_API_PROVIDER` | `deepseek` (default) or `kimi` to switch providers explicitly. |
+| `DEEPSEEK_API_KEY`, `DEEPSEEK_API_BASE`, `DEEPSEEK_MODEL`, `DEEPSEEK_TEMPERATURE`, `DEEPSEEK_MAX_TOKENS` | Configure DeepSeek when it is the active provider. |
+| `KIMI_API_KEY`, `KIMI_API_BASE`, `KIMI_MODEL`, `KIMI_TEMPERATURE`, `KIMI_MAX_TOKENS` | Configure Kimi when `LLM_API_PROVIDER=kimi`. Defaults assume `https://api.kimi.ai/v1` and `kimi-k2-thinking`. |
+
+If `LLM_API_PROVIDER` is unset, the search routines pick DeepSeek when `DEEPSEEK_API_KEY` is configured; otherwise they use Kimi if `KIMI_API_KEY` is present.
+
+```bash
+KIMI_API_KEY=sk-... LLM_API_PROVIDER=kimi python examples/auto_find_phi_tsp20.py --n-pops 2 --pop-size 6
+```
 
 ### Testing
 

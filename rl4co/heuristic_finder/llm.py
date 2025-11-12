@@ -261,69 +261,75 @@ def generate_candidates_via_ollama(
     return out
 
 
-def generate_candidates_via_deepseek(
-    prompt: str,
-    n: int = 1,
-    model: Optional[str] = None,
-    debug: bool = False,
-    system_prompt: Optional[str] = None,
-    expect_code: bool = True,
-) -> List[str]:
-    """Generate code snippets via DeepSeek API (OpenAI-compatible).
+_DEFAULT_PHI_SYSTEM_PROMPT = (
+    "You are a code generator. Return ONLY one fenced Python code block."
+    " The FIRST line inside must be a single comment: '# THOUGHT: {one-sentence idea}'."
+    " Then define exactly one function 'def phi(state):' using torch ops, broadcastable to [B,1]."
+    " Do not include explanations outside the code block."
+)
 
-    Reads API key from env var `DEEPSEEK_API_KEY`. Optional overrides:
-    - `DEEPSEEK_MODEL` (default: 'deepseek-chat')
-    - `DEEPSEEK_API_BASE` (default: 'https://api.deepseek.com/v1')
-    """
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
+
+def _generate_candidates_via_openai_compatible_api(
+    *,
+    prompt: str,
+    n: int,
+    model: Optional[str],
+    debug: bool,
+    system_prompt: Optional[str],
+    expect_code: bool,
+    env_prefix: str,
+    default_base: str,
+    default_model: str,
+    default_system_prompt: Optional[str],
+) -> List[str]:
+    prefix_upper = env_prefix.upper()
+    api_key = os.environ.get(f"{prefix_upper}_API_KEY")
     if not api_key:
         if debug:
-            print("[HeuristicFinder] DEEPSEEK_API_KEY not set; skipping DeepSeek calls.", flush=True)
+            print(
+                f"[HeuristicFinder] {prefix_upper}_API_KEY not set; skipping {env_prefix} calls.",
+                flush=True,
+            )
         return []
 
-    base_url = os.environ.get("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1")
-    model_name = model or os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+    base_url = os.environ.get(f"{prefix_upper}_API_BASE", default_base) or default_base
+    model_name = model or os.environ.get(f"{prefix_upper}_MODEL", default_model)
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
-    # System prompt (overridable): default enforces code-only
-    sys_prompt = system_prompt or (
-        "You are a code generator. Return ONLY one fenced Python code block."
-        " The FIRST line inside must be a single comment: '# THOUGHT: {one-sentence idea}'."
-        " Then define exactly one function 'def phi(state):' using torch ops, broadcastable to [B,1]."
-        " Do not include explanations outside the code block."
-    )
+    effective_system_prompt = system_prompt if system_prompt is not None else default_system_prompt
 
-    # Allow env overrides for generation parameters
     try:
-        temperature = float(os.environ.get("DEEPSEEK_TEMPERATURE", "0.0"))
+        temperature = float(os.environ.get(f"{prefix_upper}_TEMPERATURE", "0.0"))
     except Exception:
         temperature = 0.0
     try:
-        max_tokens = int(os.environ.get("DEEPSEEK_MAX_TOKENS", "1024"))
+        max_tokens = int(os.environ.get(f"{prefix_upper}_MAX_TOKENS", "1024"))
     except Exception:
         max_tokens = 32768
 
+    messages: List[Dict[str, str]] = []
+    if effective_system_prompt:
+        messages.append({"role": "system", "content": effective_system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
     payload = {
         "model": model_name,
-        "messages": [
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": prompt},
-        ],
+        "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "stream": False,
     }
 
     url = base_url.rstrip("/") + "/chat/completions"
+    dump_tag = env_prefix.lower()
 
     out: List[str] = []
     for i in range(n):
         try:
-            # Prefer requests, fallback to urllib
             try:
                 import requests  # type: ignore
 
@@ -339,14 +345,12 @@ def generate_candidates_via_deepseek(
                     b = r.read()
                     data = json.loads(b.decode("utf-8"))
 
-            # DeepSeek (OpenAI-style) response
             raw = None
             try:
                 choices = data.get("choices", []) if isinstance(data, dict) else []
                 if choices:
                     msg = choices[0].get("message", {})
                     raw = msg.get("content")
-                    # Some DeepSeek variants include 'reasoning_content'
                     if not raw and "reasoning_content" in msg:
                         raw = msg.get("reasoning_content")
             except Exception:
@@ -356,88 +360,192 @@ def generate_candidates_via_deepseek(
                 raw = str(data)
 
             cleaned = _strip_think_tags(raw)
-            _maybe_dump("deepseek_stage1_raw" if not expect_code else "deepseek_raw", cleaned)
+            _maybe_dump(f"{dump_tag}_stage1_raw" if not expect_code else f"{dump_tag}_raw", cleaned)
+
             if not expect_code:
-                # Reasoner/spec stage: return raw cleaned text (e.g., JSON)
                 if debug:
                     print("=" * 80, flush=True)
                     print(cleaned, flush=True)
                     print("=" * 80, flush=True)
                 out.append(cleaned)
                 continue
-            else:
-                code = _extract_phi_from_text(cleaned)
-                code = _ensure_thought_line(code)
-                _maybe_dump("deepseek_code_parsed", code, suffix=".py")
 
-                # Second-pass repair if not a valid function
-                if not _looks_like_phi(code):
+            code = _extract_phi_from_text(cleaned)
+            code = _ensure_thought_line(code)
+            _maybe_dump(f"{dump_tag}_code_parsed", code, suffix=".py")
+
+            if not _looks_like_phi(code):
+                try:
+                    repair_payload = {
+                        "model": model_name,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are a code generator. Return ONLY a single fenced Python code block"
+                                    " defining 'def phi(state):' using torch ops; no extra text."
+                                ),
+                            },
+                            {"role": "user", "content": _build_repair_instruction(cleaned)},
+                        ],
+                        "temperature": 0.0,
+                        "max_tokens": 32768,
+                        "stream": False,
+                    }
                     try:
-                        repair_payload = {
-                            "model": model_name,
-                            "messages": [
-                                {
-                                    "role": "system",
-                                    "content": (
-                                        "You are a code generator. Return ONLY a single fenced Python code block"
-                                        " defining 'def phi(state):' using torch ops; no extra text."
-                                    ),
-                                },
-                                {"role": "user", "content": _build_repair_instruction(cleaned)},
-                            ],
-                            "temperature": 0.0,
-                            "max_tokens": 32768,
-                            "stream": False,
-                        }
-                        try:
-                            import requests  # type: ignore
+                        import requests  # type: ignore
 
-                            r2 = requests.post(url, headers=headers, json=repair_payload, timeout=60)
-                            r2.raise_for_status()
-                            d2 = r2.json()
-                        except Exception:
-                            import urllib.request
-                            import urllib.error
+                        r2 = requests.post(url, headers=headers, json=repair_payload, timeout=60)
+                        r2.raise_for_status()
+                        d2 = r2.json()
+                    except Exception:
+                        import urllib.request
+                        import urllib.error
 
-                            req2 = urllib.request.Request(
-                                url, data=json.dumps(repair_payload).encode("utf-8"), headers=headers, method="POST"
-                            )
-                            with urllib.request.urlopen(req2, timeout=60) as rr:
-                                bb = rr.read()
-                                d2 = json.loads(bb.decode("utf-8"))
+                        req2 = urllib.request.Request(
+                            url, data=json.dumps(repair_payload).encode("utf-8"), headers=headers, method="POST"
+                        )
+                        with urllib.request.urlopen(req2, timeout=60) as rr:
+                            bb = rr.read()
+                            d2 = json.loads(bb.decode("utf-8"))
 
+                    r2_raw = None
+                    try:
+                        ch = d2.get("choices", []) if isinstance(d2, dict) else []
+                        if ch:
+                            msg2 = ch[0].get("message", {})
+                            r2_raw = msg2.get("content")
+                            if not r2_raw and "reasoning_content" in msg2:
+                                r2_raw = msg2.get("reasoning_content")
+                    except Exception:
                         r2_raw = None
-                        try:
-                            ch = d2.get("choices", []) if isinstance(d2, dict) else []
-                            if ch:
-                                msg2 = ch[0].get("message", {})
-                                r2_raw = msg2.get("content")
-                                if not r2_raw and "reasoning_content" in msg2:
-                                    r2_raw = msg2.get("reasoning_content")
-                        except Exception:
-                            r2_raw = None
-                        if r2_raw is None:
-                            r2_raw = str(d2)
+                    if r2_raw is None:
+                        r2_raw = str(d2)
 
-                        r2_clean = _strip_think_tags(r2_raw)
-                        _maybe_dump("deepseek_repair_raw", r2_clean)
-                        r2_code = _extract_phi_from_text(r2_clean)
-                        r2_code = _ensure_thought_line(r2_code)
-                        if _looks_like_phi(r2_code):
-                            code = r2_code
-                            _maybe_dump("deepseek_repair_code", code, suffix=".py")
-                    except Exception as _:
-                        pass
-                if debug:
-                    print("=" * 80, flush=True)
-                    print(code, flush=True)
-                    print("=" * 80, flush=True)
-                out.append(code)
-        except Exception as e:
+                    r2_clean = _strip_think_tags(r2_raw)
+                    _maybe_dump(f"{dump_tag}_repair_raw", r2_clean)
+                    r2_code = _extract_phi_from_text(r2_clean)
+                    r2_code = _ensure_thought_line(r2_code)
+                    if _looks_like_phi(r2_code):
+                        code = r2_code
+                        _maybe_dump(f"{dump_tag}_repair_code", code, suffix=".py")
+                except Exception:
+                    pass
+
             if debug:
-                print(f"[HeuristicFinder] DeepSeek call failed at sample {i}: {e}", flush=True)
+                print("=" * 80, flush=True)
+                print(code, flush=True)
+                print("=" * 80, flush=True)
+            out.append(code)
+        except Exception as exc:
+            if debug:
+                print(f"[HeuristicFinder] {env_prefix} call failed at sample {i}: {exc}", flush=True)
             continue
     return out
+
+
+def generate_candidates_via_deepseek(
+    prompt: str,
+    n: int = 1,
+    model: Optional[str] = None,
+    debug: bool = False,
+    system_prompt: Optional[str] = None,
+    expect_code: bool = True,
+) -> List[str]:
+    """Generate code snippets via DeepSeek API (OpenAI-compatible)."""
+    return _generate_candidates_via_openai_compatible_api(
+        prompt=prompt,
+        n=n,
+        model=model,
+        debug=debug,
+        system_prompt=system_prompt,
+        expect_code=expect_code,
+        env_prefix="deepseek",
+        default_base="https://api.deepseek.com/v1",
+        default_model="deepseek-chat",
+        default_system_prompt=_DEFAULT_PHI_SYSTEM_PROMPT,
+    )
+
+
+def generate_candidates_via_kimi(
+    prompt: str,
+    n: int = 1,
+    model: Optional[str] = None,
+    debug: bool = False,
+    system_prompt: Optional[str] = None,
+    expect_code: bool = True,
+) -> List[str]:
+    """Generate code snippets via Kimi's OpenAI-compatible API (e.g., k2-thinking)."""
+    return _generate_candidates_via_openai_compatible_api(
+        prompt=prompt,
+        n=n,
+        model=model,
+        debug=debug,
+        system_prompt=system_prompt,
+        expect_code=expect_code,
+        env_prefix="kimi",
+        default_base="https://api.kimi.ai/v1",
+        default_model="kimi-k2-thinking",
+        default_system_prompt=_DEFAULT_PHI_SYSTEM_PROMPT,
+    )
+
+
+def _resolve_llm_api_provider(preferred: Optional[str] = None) -> str:
+    candidates = {"deepseek", "kimi"}
+    if preferred:
+        candidate = preferred.strip().lower()
+        if candidate in candidates:
+            return candidate
+    env_provider = os.environ.get("LLM_API_PROVIDER")
+    if env_provider:
+        candidate = env_provider.strip().lower()
+        if candidate in candidates:
+            return candidate
+    if os.environ.get("DEEPSEEK_API_KEY"):
+        return "deepseek"
+    if os.environ.get("KIMI_API_KEY"):
+        return "kimi"
+    return "deepseek"
+
+
+def _default_reasoner_model(provider: str) -> str:
+    if provider == "kimi":
+        return os.environ.get("KIMI_REASONER_MODEL") or os.environ.get("KIMI_MODEL") or "kimi-k2-thinking"
+    return os.environ.get("DEEPSEEK_REASONER_MODEL") or os.environ.get("DEEPSEEK_MODEL") or "deepseek-reasoner"
+
+
+def _default_coder_model(provider: str) -> str:
+    if provider == "kimi":
+        return os.environ.get("KIMI_MODEL") or "kimi-k2-thinking"
+    return os.environ.get("DEEPSEEK_MODEL") or "deepseek-chat"
+
+
+def _generate_candidates_for_provider(
+    provider: str,
+    prompt: str,
+    n: int = 1,
+    model: Optional[str] = None,
+    debug: bool = False,
+    system_prompt: Optional[str] = None,
+    expect_code: bool = True,
+) -> List[str]:
+    if provider == "kimi":
+        return generate_candidates_via_kimi(
+            prompt=prompt,
+            n=n,
+            model=model,
+            debug=debug,
+            system_prompt=system_prompt,
+            expect_code=expect_code,
+        )
+    return generate_candidates_via_deepseek(
+        prompt=prompt,
+        n=n,
+        model=model,
+        debug=debug,
+        system_prompt=system_prompt,
+        expect_code=expect_code,
+    )
 
 
 def generate_candidates(
@@ -447,19 +555,20 @@ def generate_candidates(
     ollama_model: Optional[str] = None,
     api_model: Optional[str] = None,
 ) -> List[str]:
-    """Unified LLM generation: prefer Ollama if a model is provided, otherwise DeepSeek API.
+    """Unified LLM generation: prefer Ollama if available, otherwise DeepSeek or Kimi API.
 
-    - If `ollama_model` is not None, uses local Ollama.
-    - Else, uses DeepSeek API with env `DEEPSEEK_API_KEY`.
+    - If `ollama_model` is provided, uses local Ollama.
+    - Else, uses the OpenAI-compatible provider selected by `LLM_API_PROVIDER` (default DeepSeek).
     """
     if ollama_model:
         try:
             return generate_candidates_via_ollama(ollama_model, prompt, n=n, debug=debug)
         except Exception:
             if debug:
-                print("[HeuristicFinder] Ollama path failed; falling back to DeepSeek API.", flush=True)
+                print("[HeuristicFinder] Ollama path failed; falling back to remote provider.", flush=True)
             # fall through to DeepSeek
-    return generate_candidates_via_deepseek(prompt, n=n, model=api_model, debug=debug)
+    provider = _resolve_llm_api_provider()
+    return _generate_candidates_for_provider(provider, prompt, n=n, model=api_model, debug=debug)
 
 
 def _reasoner_spec_prompt(context: str) -> str:
@@ -497,25 +606,32 @@ def two_stage_generate_candidates(
     debug: bool = False,
     reasoner_model: Optional[str] = None,
     coder_ollama_model: Optional[str] = None,
+    api_provider: Optional[str] = None,
 ) -> List[str]:
-    """Two-stage generation: DeepSeek reasoner for spec, then Ollama (Qwen) for code.
+    """Two-stage generation: provider reasoner/spec followed by Ollama (Qwen) or provider chat coder.
 
-    - Stage 1 (spec): uses DeepSeek API with model from env `DEEPSEEK_MODEL` or `deepseek-reasoner`.
-    - Stage 2 (code): uses local Ollama model (e.g., qwen3:32b). If Ollama not available, falls back to DeepSeek chat.
+    - Stage 1 (spec): uses the selected provider (DeepSeek or Kimi) reasoner model.
+    - Stage 2 (code): uses local Ollama (if available) otherwise the provider chat model.
     """
     # Stage 1: reasoner spec
     spec_ctx = _reasoner_context(env_name)
     spec_msgs_prompt = _reasoner_spec_prompt(spec_ctx)
-    # Force reasoner model default
-    rm = reasoner_model or os.environ.get("DEEPSEEK_REASONER_MODEL", None) or os.environ.get("DEEPSEEK_MODEL", "deepseek-reasoner")
+    provider = _resolve_llm_api_provider(api_provider)
+    rm = reasoner_model or _default_reasoner_model(provider)
     json_sys_prompt = (
         "You are a PBRS/TSP expert. Return ONLY valid JSON (no code, no explanations) that matches the requested schema."
     )
-    specs = generate_candidates_via_deepseek(
-        spec_msgs_prompt, n=n, model=rm, debug=debug, system_prompt=json_sys_prompt, expect_code=False
+    specs = _generate_candidates_for_provider(
+        provider,
+        spec_msgs_prompt,
+        n=n,
+        model=rm,
+        debug=debug,
+        system_prompt=json_sys_prompt,
+        expect_code=False,
     )
     if not specs:
-        # fallback: use single-stage DeepSeek with stronger system prompt
+        # fallback: use single-stage provider with a stronger system prompt
         if debug:
             print("[HeuristicFinder] Reasoner produced no specs; falling back to single-stage generation.", flush=True)
         return generate_candidates(prompt, n=n, debug=debug, ollama_model=coder_ollama_model)
@@ -528,11 +644,23 @@ def two_stage_generate_candidates(
             if coder_model:
                 codes = generate_candidates_via_ollama(coder_model, coder_prompt, n=1, debug=debug)
                 if not codes or not _looks_like_phi(codes[0]):
-                    # fall back to DeepSeek chat coder
-                    codes = generate_candidates_via_deepseek(coder_prompt, n=1, model=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"), debug=debug)
+                    fallback_model = _default_coder_model(provider)
+                    codes = _generate_candidates_for_provider(
+                        provider,
+                        coder_prompt,
+                        n=1,
+                        model=fallback_model,
+                        debug=debug,
+                    )
             else:
-                # no Ollama model provided; try DeepSeek chat directly
-                codes = generate_candidates_via_deepseek(coder_prompt, n=1, model=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"), debug=debug)
+                fallback_model = _default_coder_model(provider)
+                codes = _generate_candidates_for_provider(
+                    provider,
+                    coder_prompt,
+                    n=1,
+                    model=fallback_model,
+                    debug=debug,
+                )
             if codes:
                 out.append(codes[0])
         except Exception as e:

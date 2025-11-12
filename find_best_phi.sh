@@ -4,15 +4,21 @@ set -euo pipefail
 # cd to repo root (directory of this script)
 cd "$(dirname "$0")"
 
-echo "[INFO] Launching EoH-style multi-pop search via DeepSeek API (logs: find_best_phi.log)" | tee -a setup.log
+echo "[INFO] Launching EoH-style multi-pop search via DeepSeek/Kimi API (logs: find_best_phi.log)" | tee -a setup.log
 
-# ===== DeepSeek API configuration =====
-# Required: export DEEPSEEK_API_KEY in your environment (already set as you mentioned).
-# Optional overrides (defaults below):
+# ===== Remote LLM API configuration =====
+# Required: export DEEPSEEK_API_KEY (default) or KIMI_API_KEY plus set LLM_API_PROVIDER=kimi.
+export LLM_API_PROVIDER="${LLM_API_PROVIDER:-deepseek}"
+# DeepSeek overrides
 export DEEPSEEK_API_BASE="${DEEPSEEK_API_BASE:-https://api.deepseek.com/v1}"
 export DEEPSEEK_MODEL="${DEEPSEEK_MODEL:-deepseek-reasoner}"
 export DEEPSEEK_MAX_TOKENS="${DEEPSEEK_MAX_TOKENS:-32768}"
 export DEEPSEEK_TEMPERATURE="${DEEPSEEK_TEMPERATURE:-0.0}"
+# Kimi overrides (used when provider is kimi)
+export KIMI_API_BASE="${KIMI_API_BASE:-https://api.kimi.ai/v1}"
+export KIMI_MODEL="${KIMI_MODEL:-kimi-k2-thinking}"
+export KIMI_MAX_TOKENS="${KIMI_MAX_TOKENS:-32768}"
+export KIMI_TEMPERATURE="${KIMI_TEMPERATURE:-0.0}"
 
 # ===== TSP nodes (short-training fitness) =====
 # Controls the TSP size used during short-training fitness (train_fitness_phi_on_tsp20).
@@ -49,13 +55,14 @@ ELITE_PARENT_K=${ELITE_PARENT_K:-2}
 ELITE_REPLACE_WORST=${ELITE_REPLACE_WORST:-0}
 
 # Output / misc
+SEED_DUMP_DIR=${SEED_DUMP_DIR:-}
 DUMP_DIR=${DUMP_DIR:-runs/eoh}
 SAVE_PATH=${SAVE_PATH:-phi_best.py}
 TOPK=${TOPK:-5}
 SEED=${SEED:-1234}
 GPU_IDS=${GPU_IDS:-0,1,2,3,4,5}        # e.g., "0,1,2,3" for parallel short-training; leave empty for CPU
 
-# Build command (no Ollama flags; we use DeepSeek API via env)
+# Build command (no Ollama flags; we use remote API via env)
 cmd=(python examples/auto_find_phi_tsp20.py
   --n-pops "$N_POPS"
   --pop-size "$POP_SIZE"
@@ -81,6 +88,10 @@ if [[ "${NORM_DPHI}" == "1" ]]; then cmd+=(--norm-dphi); fi
 
 if [[ -n "$GPU_IDS" ]]; then
   cmd+=(--gpu-ids "$GPU_IDS")
+fi
+
+if [[ -n "$SEED_DUMP_DIR" ]]; then
+  cmd+=(--seed-dump-dir "$SEED_DUMP_DIR")
 fi
 
 echo "Running: ${cmd[*]} $*" | tee -a setup.log

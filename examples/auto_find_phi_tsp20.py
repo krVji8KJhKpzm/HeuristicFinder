@@ -16,7 +16,7 @@ Examples:
     --epochs-per-eval 1 --batch-size 64 --train-size 1000 --val-size 256 \
     --dump-dir runs/eoh --train-after --train-epochs 100 --gpus 1
 
-  # DeepSeek API (set DEEPSEEK_API_KEY)
+  # Remote API (set DEEPSEEK_API_KEY or KIMI_API_KEY + LLM_API_PROVIDER=kimi)
   DEEPSEEK_API_KEY=sk-... python examples/auto_find_phi_tsp20.py \
     --n-pops 2 --pop-size 6 --generations 6 --dump-dir runs/eoh
 """
@@ -34,8 +34,12 @@ from dotenv import load_dotenv
 PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
-api_key = os.getenv("DEEPSEEK_API_KEY")
-print("DEEPSEEK_API_KEY:", api_key)
+provider = os.getenv("LLM_API_PROVIDER", "deepseek").lower()
+print("LLM API Provider:", provider)
+if provider == "kimi":
+    print("KIMI_API_KEY:", os.getenv("KIMI_API_KEY"))
+else:
+    print("DEEPSEEK_API_KEY:", os.getenv("DEEPSEEK_API_KEY"))
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
