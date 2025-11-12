@@ -188,7 +188,7 @@ def _reasoner_context(env_name: str = "tsp") -> str:
 
 
 def generate_candidates_via_ollama(
-    model: str, prompt: str, n: int = 1, debug: bool = False
+    model: str, prompt: str, n: int = 1, debug: bool = False, stream: bool = False
 ) -> List[str]:
     """Generate code snippets via Ollama. Requires 'ollama' available in runtime.
 
@@ -206,7 +206,7 @@ def generate_candidates_via_ollama(
     out: List[str] = []
     for i in range(n):
         try:
-            resp = ollama.generate(model=model, prompt=prompt, stream=False)
+            resp = ollama.generate(model=model, prompt=prompt, stream=stream)
             # Robustly extract the text field from various client return types
             raw = None
             if isinstance(resp, dict):
@@ -232,7 +232,7 @@ def generate_candidates_via_ollama(
             if not _looks_like_phi(code):
                 try:
                     repair_prompt = _build_repair_instruction(cleaned)
-                    r2 = ollama.generate(model=model, prompt=repair_prompt, stream=False)
+                    r2 = ollama.generate(model=model, prompt=repair_prompt, stream=stream)
                     r2_raw = None
                     if isinstance(r2, dict):
                         r2_raw = r2.get("response", None)
@@ -281,6 +281,7 @@ def _generate_candidates_via_openai_compatible_api(
     default_base: str,
     default_model: str,
     default_system_prompt: Optional[str],
+    stream: bool = False,
 ) -> List[str]:
     prefix_upper = env_prefix.upper()
     api_key = os.environ.get(f"{prefix_upper}_API_KEY")
@@ -321,7 +322,7 @@ def _generate_candidates_via_openai_compatible_api(
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
-        "stream": False,
+        "stream": stream,
     }
 
     url = base_url.rstrip("/") + "/chat/completions"
@@ -337,9 +338,30 @@ def _generate_candidates_via_openai_compatible_api(
 
                 resp = requests.post(url, headers=headers, json=payload, timeout=(10, 300))
                 resp.raise_for_status()
-                data = resp.json()
-
-                print(f"Request cost {time.time() - start_time} (seconds)", flush=True)
+                
+                if stream:
+                    # Handle streaming response
+                    raw = ""
+                    for line in resp.iter_lines():
+                        if line:
+                            line_str = line.decode('utf-8')
+                            if line_str.startswith('data: '):
+                                data_str = line_str[6:]  # Remove 'data: ' prefix
+                                if data_str == '[DONE]':
+                                    break
+                                try:
+                                    chunk_data = json.loads(data_str)
+                                    choices = chunk_data.get("choices", [])
+                                    if choices:
+                                        delta = choices[0].get("delta", {})
+                                        content = delta.get("content", "")
+                                        if content:
+                                            raw += content
+                                except json.JSONDecodeError:
+                                    continue
+                    data = {"choices": [{"message": {"content": raw}}]}
+                else:
+                    data = resp.json()
             except Exception as e:
                 print(f"Request failed, error:{e}", flush=True)
                 import urllib.request
@@ -396,14 +418,37 @@ def _generate_candidates_via_openai_compatible_api(
                         ],
                         "temperature": 0.0,
                         "max_tokens": 32768,
-                        "stream": False,
+                        "stream": stream,
                     }
                     try:
                         import requests  # type: ignore
 
                         r2 = requests.post(url, headers=headers, json=repair_payload, timeout=60)
                         r2.raise_for_status()
-                        d2 = r2.json()
+                        
+                        if stream:
+                            # Handle streaming response for repair
+                            r2_raw = ""
+                            for line in r2.iter_lines():
+                                if line:
+                                    line_str = line.decode('utf-8')
+                                    if line_str.startswith('data: '):
+                                        data_str = line_str[6:]
+                                        if data_str == '[DONE]':
+                                            break
+                                        try:
+                                            chunk_data = json.loads(data_str)
+                                            choices = chunk_data.get("choices", [])
+                                            if choices:
+                                                delta = choices[0].get("delta", {})
+                                                content = delta.get("content", "")
+                                                if content:
+                                                    r2_raw += content
+                                        except json.JSONDecodeError:
+                                            continue
+                            d2 = {"choices": [{"message": {"content": r2_raw}}]}
+                        else:
+                            d2 = r2.json()
                     except Exception:
                         import urllib.request
                         import urllib.error
@@ -457,6 +502,7 @@ def generate_candidates_via_deepseek(
     debug: bool = False,
     system_prompt: Optional[str] = None,
     expect_code: bool = True,
+    stream: bool = False,
 ) -> List[str]:
     """Generate code snippets via DeepSeek API (OpenAI-compatible)."""
     return _generate_candidates_via_openai_compatible_api(
@@ -470,6 +516,7 @@ def generate_candidates_via_deepseek(
         default_base="https://api.deepseek.com/v1",
         default_model="deepseek-chat",
         default_system_prompt=_DEFAULT_PHI_SYSTEM_PROMPT,
+        stream=stream,
     )
 
 
@@ -480,6 +527,7 @@ def generate_candidates_via_kimi(
     debug: bool = False,
     system_prompt: Optional[str] = None,
     expect_code: bool = True,
+    stream: bool = False,
 ) -> List[str]:
     """Generate code snippets via Kimi's OpenAI-compatible API (e.g., k2-thinking)."""
     return _generate_candidates_via_openai_compatible_api(
@@ -493,6 +541,7 @@ def generate_candidates_via_kimi(
         default_base="https://api.moonshot.cn/v1",
         default_model="kimi-k2-turbo-preview",
         default_system_prompt=_DEFAULT_PHI_SYSTEM_PROMPT,
+        stream=stream,
     )
 
 
@@ -503,6 +552,7 @@ def generate_candidates_via_glm(
     debug: bool = False,
     system_prompt: Optional[str] = None,
     expect_code: bool = True,
+    stream: bool = False,
 ) -> List[str]:
     """Generate code snippets via GLM (General Language Model) API (OpenAI-compatible)."""
     return _generate_candidates_via_openai_compatible_api(
@@ -516,6 +566,7 @@ def generate_candidates_via_glm(
         default_base="https://open.bigmodel.cn/api/paas/v4",
         default_model="glm-4",
         default_system_prompt=_DEFAULT_PHI_SYSTEM_PROMPT,
+        stream=stream,
     )
 
 
@@ -563,6 +614,7 @@ def _generate_candidates_for_provider(
     debug: bool = False,
     system_prompt: Optional[str] = None,
     expect_code: bool = True,
+    stream: bool = False,
 ) -> List[str]:
     if provider == "kimi":
         return generate_candidates_via_kimi(
@@ -572,6 +624,7 @@ def _generate_candidates_for_provider(
             debug=debug,
             system_prompt=system_prompt,
             expect_code=expect_code,
+            stream=stream,
         )
     if provider == "glm":
         return generate_candidates_via_glm(
@@ -581,6 +634,7 @@ def _generate_candidates_for_provider(
             debug=debug,
             system_prompt=system_prompt,
             expect_code=expect_code,
+            stream=stream,
         )
     return generate_candidates_via_deepseek(
         prompt=prompt,
@@ -589,6 +643,7 @@ def _generate_candidates_for_provider(
         debug=debug,
         system_prompt=system_prompt,
         expect_code=expect_code,
+        stream=stream,
     )
 
 
