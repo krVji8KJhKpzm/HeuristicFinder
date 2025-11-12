@@ -677,6 +677,7 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
 
     # Evolution by generations, population-wise independent selection
     for gen_idx in range(n_gen):
+        print(f"Evoving generation {gen_idx}/{n_gen}...", flush=True)
         for pop_idx in range(n_pops):
             scored = populations[pop_idx]
             # Optional: mix elite archive into parent pool by appending pseudo-scored elites

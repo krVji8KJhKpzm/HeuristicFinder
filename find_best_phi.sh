@@ -28,8 +28,8 @@ export LLM_DEBUG=0
 export LLM_DUMP_DIR=""
 
 # ===== Evolution settings (EoH-style) =====
-N_POPS=${N_POPS:-2}
-POP_SIZE=${POP_SIZE:-5}
+N_POPS=${N_POPS:-1}
+POP_SIZE=${POP_SIZE:-20}
 GENERATIONS=${GENERATIONS:-10}
 OPERATORS=${OPERATORS:-e1,e2,m1,m2}
 OP_WEIGHTS=${OP_WEIGHTS:-1,1,1,1}
@@ -98,3 +98,5 @@ echo "Running: ${cmd[*]} $*" | tee -a setup.log
 nohup "${cmd[@]}" "$@" > find_best_phi.log 2>&1 &
 
 echo "[INFO] Started. Tail logs with: tail -f find_best_phi.log" | tee -a setup.log
+
+# baseline: 4.534433

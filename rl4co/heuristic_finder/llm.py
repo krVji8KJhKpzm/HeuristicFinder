@@ -331,17 +331,17 @@ def _generate_candidates_via_openai_compatible_api(
     for i in range(n):
         print("Requesting to LLM...")
         try:
+            start_time = time.time()
             try:
                 import requests  # type: ignore
 
-                resp = requests.post(url, headers=headers, json=payload, timeout=60)
+                resp = requests.post(url, headers=headers, json=payload, timeout=(10, 300))
                 resp.raise_for_status()
                 data = resp.json()
+
+                print(f"Request cost {time.time() - start_time} (seconds)", flush=True)
             except Exception as e:
-                print(f"Request failed, error:{e}")
-                print(model_name)
-                print(messages)
-                exit()
+                print(f"Request failed, error:{e}", flush=True)
                 import urllib.request
                 import urllib.error
 
