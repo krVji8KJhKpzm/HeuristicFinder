@@ -989,7 +989,7 @@ def _prompt_m3(parent: Dict[str, str], env_name: str = "tsp") -> str:
     )
 
 
-def eoh_llm_repair(model: Optional[str], parent_code: str, env_name: str = "tsp", n: int = 1, debug: bool = False) -> List[str]:
+def eoh_llm_repair(model: Optional[str], parent_code: str, env_name: str = "tsp", n: int = 1, debug: bool = False, stream: bool = False) -> List[str]:
     """Memetic-style light repair/simplify pass that preserves I/O and improves stability.
 
     The model should return ONLY a fenced Python code block for `def phi(state): ...`.
@@ -1012,7 +1012,7 @@ def eoh_llm_repair(model: Optional[str], parent_code: str, env_name: str = "tsp"
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
-def eoh_llm_e1(model: Optional[str], parents: List[Dict[str, str]], n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
+def eoh_llm_e1(model: Optional[str], parents: List[Dict[str, str]], n: int = 1, env_name: str = "tsp", debug: bool = False, stream: bool = False) -> List[str]:
     prompt = _prompt_e1(parents, env_name)
     # allow env to force debug
     debug = debug or os.environ.get("LLM_DEBUG", "").lower() in ("1", "true", "yes")
@@ -1021,7 +1021,7 @@ def eoh_llm_e1(model: Optional[str], parents: List[Dict[str, str]], n: int = 1, 
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
-def eoh_llm_e2(model: Optional[str], parents: List[Dict[str, str]], n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
+def eoh_llm_e2(model: Optional[str], parents: List[Dict[str, str]], n: int = 1, env_name: str = "tsp", debug: bool = False, stream: bool = False) -> List[str]:
     prompt = _prompt_e2(parents, env_name)
     debug = debug or os.environ.get("LLM_DEBUG", "").lower() in ("1", "true", "yes")
     if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):
@@ -1029,7 +1029,7 @@ def eoh_llm_e2(model: Optional[str], parents: List[Dict[str, str]], n: int = 1, 
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
-def eoh_llm_i1(model: Optional[str], n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
+def eoh_llm_i1(model: Optional[str], n: int = 1, env_name: str = "tsp", debug: bool = False, stream: bool = False) -> List[str]:
     prompt = _prompt_i1(env_name)
     debug = debug or os.environ.get("LLM_DEBUG", "").lower() in ("1", "true", "yes")
     if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):
@@ -1037,7 +1037,7 @@ def eoh_llm_i1(model: Optional[str], n: int = 1, env_name: str = "tsp", debug: b
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
-def eoh_llm_m1(model: Optional[str], parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
+def eoh_llm_m1(model: Optional[str], parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False, stream: bool = False) -> List[str]:
     parent = {"algorithm": "(no description)", "code": parent_code}
     prompt = _prompt_m1(parent, env_name)
     debug = debug or os.environ.get("LLM_DEBUG", "").lower() in ("1", "true", "yes")
@@ -1046,7 +1046,7 @@ def eoh_llm_m1(model: Optional[str], parent_code: str, n: int = 1, env_name: str
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
-def eoh_llm_m2(model: Optional[str], parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
+def eoh_llm_m2(model: Optional[str], parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False, stream: bool = False) -> List[str]:
     parent = {"algorithm": "(no description)", "code": parent_code}
     prompt = _prompt_m2(parent, env_name)
     debug = debug or os.environ.get("LLM_DEBUG", "").lower() in ("1", "true", "yes")
@@ -1055,7 +1055,7 @@ def eoh_llm_m2(model: Optional[str], parent_code: str, n: int = 1, env_name: str
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
-def eoh_llm_m3(model: Optional[str], parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False) -> List[str]:
+def eoh_llm_m3(model: Optional[str], parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False, stream: bool = False) -> List[str]:
     parent = {"code": parent_code}
     prompt = _prompt_m3(parent, env_name)
     if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):

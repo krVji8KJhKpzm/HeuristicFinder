@@ -14,11 +14,13 @@ export DEEPSEEK_API_BASE="${DEEPSEEK_API_BASE:-https://api.deepseek.com/v1}"
 export DEEPSEEK_MODEL="${DEEPSEEK_MODEL:-deepseek-reasoner}"
 export DEEPSEEK_MAX_TOKENS="${DEEPSEEK_MAX_TOKENS:-32768}"
 export DEEPSEEK_TEMPERATURE="${DEEPSEEK_TEMPERATURE:-0.0}"
+export DEEPSEEK_STREAM="${DEEPSEEK_STREAM:-false}"
 # Kimi overrides (used when provider is kimi)
 export KIMI_API_BASE="${KIMI_API_BASE:-https://api.moonshot.cn/v1}"
 export KIMI_MODEL="${KIMI_MODEL:-kimi-k2-turbo-preview}"
 export KIMI_MAX_TOKENS="${KIMI_MAX_TOKENS:-8192}"
 export KIMI_TEMPERATURE="${KIMI_TEMPERATURE:-0.6}"
+export KIMI_STREAM="${KIMI_STREAM:-false}"
 
 # ===== TSP nodes (short-training fitness) =====
 # Controls the TSP size used during short-training fitness (train_fitness_phi_on_tsp20).

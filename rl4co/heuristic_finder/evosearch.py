@@ -243,24 +243,34 @@ def _propose_offspring_for_operator(
     N = int(ps)
     out: List[Candidate] = []
 
+    # Determine streaming setting from environment variables
+    stream = False
+    provider = os.environ.get("LLM_API_PROVIDER", "deepseek").lower()
+    if provider == "kimi":
+        stream = os.environ.get("KIMI_STREAM", "false").lower() in ("true", "1", "yes")
+    elif provider == "deepseek":
+        stream = os.environ.get("DEEPSEEK_STREAM", "false").lower() in ("true", "1", "yes")
+    elif provider == "glm":
+        stream = os.environ.get("GLM_STREAM", "false").lower() in ("true", "1", "yes")
+
     for _ in range(N):
         try:
             if operator in ("e1", "e2"):
                 pars = _tournament_select(scored, m=cfg.m_parents, k=cfg.tournament_k)
                 pack = _parents_pack(pars)
                 if operator == "e1":
-                    codes = eoh_llm_e1(cfg.ollama_model, pack, n=1, env_name="tsp", debug=False)
+                    codes = eoh_llm_e1(cfg.ollama_model, pack, n=1, env_name="tsp", debug=False, stream=stream)
                 else:
-                    codes = eoh_llm_e2(cfg.ollama_model, pack, n=1, env_name="tsp", debug=False)
+                    codes = eoh_llm_e2(cfg.ollama_model, pack, n=1, env_name="tsp", debug=False, stream=stream)
             elif operator == "m1":
                 par = _tournament_select(scored, m=1, k=cfg.tournament_k)[0]
-                codes = eoh_llm_m1(cfg.ollama_model, par.spec.code, n=1, env_name="tsp", debug=False)
+                codes = eoh_llm_m1(cfg.ollama_model, par.spec.code, n=1, env_name="tsp", debug=False, stream=stream)
             elif operator == "m2":
                 par = _tournament_select(scored, m=1, k=cfg.tournament_k)[0]
-                codes = eoh_llm_m2(cfg.ollama_model, par.spec.code, n=1, env_name="tsp", debug=False)
+                codes = eoh_llm_m2(cfg.ollama_model, par.spec.code, n=1, env_name="tsp", debug=False, stream=stream)
             elif operator == "m3":
                 par = _tournament_select(scored, m=1, k=cfg.tournament_k)[0]
-                codes = eoh_llm_m3(cfg.ollama_model, par.spec.code, n=1, env_name="tsp", debug=False)
+                codes = eoh_llm_m3(cfg.ollama_model, par.spec.code, n=1, env_name="tsp", debug=False, stream=stream)
             else:
                 # unknown operator: skip
                 continue
@@ -270,7 +280,7 @@ def _propose_offspring_for_operator(
                 try:
                     repaired: List[str] = []
                     for c in codes:
-                        rc = eoh_llm_repair(cfg.ollama_model, c, env_name="tsp", n=1, debug=False)
+                        rc = eoh_llm_repair(cfg.ollama_model, c, env_name="tsp", n=1, debug=False, stream=stream)
                         repaired.append(rc[0] if rc else c)
                     codes = repaired
                 except Exception:
@@ -648,7 +658,18 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
         if len(init_cands) < pop_size:
             need_init = pop_size - len(init_cands)
             total_init = need_init * max(1, int(cfg.initial_copies))
-            init_codes = eoh_llm_i1(cfg.ollama_model, n=total_init, env_name="tsp", debug=False)
+            
+            # Determine streaming setting from environment variables
+            stream = False
+            provider = os.environ.get("LLM_API_PROVIDER", "deepseek").lower()
+            if provider == "kimi":
+                stream = os.environ.get("KIMI_STREAM", "false").lower() in ("true", "1", "yes")
+            elif provider == "deepseek":
+                stream = os.environ.get("DEEPSEEK_STREAM", "false").lower() in ("true", "1", "yes")
+            elif provider == "glm":
+                stream = os.environ.get("GLM_STREAM", "false").lower() in ("true", "1", "yes")
+            
+            init_codes = eoh_llm_i1(cfg.ollama_model, n=total_init, env_name="tsp", debug=False, stream=stream)
             specs = compile_candidates(init_codes)
             if not specs:
                 print(init_codes)
