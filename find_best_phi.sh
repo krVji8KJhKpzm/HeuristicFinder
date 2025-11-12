@@ -8,17 +8,17 @@ echo "[INFO] Launching EoH-style multi-pop search via DeepSeek/Kimi API (logs: f
 
 # ===== Remote LLM API configuration =====
 # Required: export DEEPSEEK_API_KEY (default) or KIMI_API_KEY plus set LLM_API_PROVIDER=kimi.
-export LLM_API_PROVIDER="${LLM_API_PROVIDER:-deepseek}"
+export LLM_API_PROVIDER="${LLM_API_PROVIDER:-kimi}"
 # DeepSeek overrides
 export DEEPSEEK_API_BASE="${DEEPSEEK_API_BASE:-https://api.deepseek.com/v1}"
 export DEEPSEEK_MODEL="${DEEPSEEK_MODEL:-deepseek-reasoner}"
 export DEEPSEEK_MAX_TOKENS="${DEEPSEEK_MAX_TOKENS:-32768}"
 export DEEPSEEK_TEMPERATURE="${DEEPSEEK_TEMPERATURE:-0.0}"
 # Kimi overrides (used when provider is kimi)
-export KIMI_API_BASE="${KIMI_API_BASE:-https://api.kimi.ai/v1}"
-export KIMI_MODEL="${KIMI_MODEL:-kimi-k2-thinking}"
-export KIMI_MAX_TOKENS="${KIMI_MAX_TOKENS:-32768}"
-export KIMI_TEMPERATURE="${KIMI_TEMPERATURE:-0.0}"
+export KIMI_API_BASE="${KIMI_API_BASE:-https://api.moonshot.cn/v1}"
+export KIMI_MODEL="${KIMI_MODEL:-kimi-k2-turbo-preview}"
+export KIMI_MAX_TOKENS="${KIMI_MAX_TOKENS:-8192}"
+export KIMI_TEMPERATURE="${KIMI_TEMPERATURE:-0.6}"
 
 # ===== TSP nodes (short-training fitness) =====
 # Controls the TSP size used during short-training fitness (train_fitness_phi_on_tsp20).
