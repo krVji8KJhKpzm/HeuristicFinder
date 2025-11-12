@@ -199,8 +199,8 @@ def generate_candidates_via_ollama(
     try:
         import ollama  # type: ignore
     except Exception as e:
-        if debug:
-            print("[HeuristicFinder] Ollama Python package not found or failed to import:", e, flush=True)
+        # if debug:
+        print("[HeuristicFinder] Ollama Python package not found or failed to import:", e, flush=True)
         return []
 
     out: List[str] = []
@@ -255,8 +255,8 @@ def generate_candidates_via_ollama(
                 print("=" * 80, flush=True)
             out.append(code)
         except Exception as e:
-            if debug:
-                print(f"[HeuristicFinder] Ollama generate failed at sample {i}: {e}", flush=True)
+            # if debug:
+            print(f"[HeuristicFinder] Ollama generate failed at sample {i}: {e}", flush=True)
             continue
     return out
 
@@ -329,6 +329,7 @@ def _generate_candidates_via_openai_compatible_api(
 
     out: List[str] = []
     for i in range(n):
+        print("Requesting to LLM...")
         try:
             try:
                 import requests  # type: ignore
@@ -336,12 +337,16 @@ def _generate_candidates_via_openai_compatible_api(
                 resp = requests.post(url, headers=headers, json=payload, timeout=60)
                 resp.raise_for_status()
                 data = resp.json()
-            except Exception:
+            except Exception as e:
+                print(f"Request failed, error:{e}")
+                print(model_name)
+                print(messages)
+                exit()
                 import urllib.request
                 import urllib.error
 
                 req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-                with urllib.request.urlopen(req, timeout=60) as r:
+                with urllib.request.urlopen(req, timeout=10) as r:
                     b = r.read()
                     data = json.loads(b.decode("utf-8"))
 
@@ -358,6 +363,7 @@ def _generate_candidates_via_openai_compatible_api(
 
             if raw is None:
                 raw = str(data)
+                print(f"LLM response: {raw}")
 
             cleaned = _strip_think_tags(raw)
             _maybe_dump(f"{dump_tag}_stage1_raw" if not expect_code else f"{dump_tag}_raw", cleaned)
@@ -438,8 +444,8 @@ def _generate_candidates_via_openai_compatible_api(
                 print("=" * 80, flush=True)
             out.append(code)
         except Exception as exc:
-            if debug:
-                print(f"[HeuristicFinder] {env_prefix} call failed at sample {i}: {exc}", flush=True)
+            # if debug:
+            print(f"[HeuristicFinder] {env_prefix} call failed at sample {i}: {exc}", flush=True)
             continue
     return out
 
@@ -484,8 +490,8 @@ def generate_candidates_via_kimi(
         system_prompt=system_prompt,
         expect_code=expect_code,
         env_prefix="kimi",
-        default_base="https://api.kimi.ai/v1",
-        default_model="kimi-k2-thinking",
+        default_base="https://api.moonshot.cn/v1",
+        default_model="kimi-k2-turbo-preview",
         default_system_prompt=_DEFAULT_PHI_SYSTEM_PROMPT,
     )
 
@@ -564,8 +570,8 @@ def generate_candidates(
         try:
             return generate_candidates_via_ollama(ollama_model, prompt, n=n, debug=debug)
         except Exception:
-            if debug:
-                print("[HeuristicFinder] Ollama path failed; falling back to remote provider.", flush=True)
+            # if debug:
+            print("[HeuristicFinder] Ollama path failed; falling back to remote provider.", flush=True)
             # fall through to DeepSeek
     provider = _resolve_llm_api_provider()
     return _generate_candidates_for_provider(provider, prompt, n=n, model=api_model, debug=debug)
@@ -664,8 +670,8 @@ def two_stage_generate_candidates(
             if codes:
                 out.append(codes[0])
         except Exception as e:
-            if debug:
-                print(f"[HeuristicFinder] two-stage failed at sample {i}: {e}", flush=True)
+            # if debug:
+            print(f"[HeuristicFinder] two-stage failed at sample {i}: {e}", flush=True)
             continue
     return out
 
