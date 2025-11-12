@@ -362,6 +362,8 @@ def _generate_candidates_via_openai_compatible_api(
                     data = {"choices": [{"message": {"content": raw}}]}
                 else:
                     data = resp.json()
+
+                print(f"Request cost time: {time.time() - start_time} (s)", flush=True)
             except Exception as e:
                 print(f"Request failed, error:{e}", flush=True)
                 import urllib.request
