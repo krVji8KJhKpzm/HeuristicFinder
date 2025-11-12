@@ -490,8 +490,31 @@ def generate_candidates_via_kimi(
     )
 
 
+def generate_candidates_via_glm(
+    prompt: str,
+    n: int = 1,
+    model: Optional[str] = None,
+    debug: bool = False,
+    system_prompt: Optional[str] = None,
+    expect_code: bool = True,
+) -> List[str]:
+    """Generate code snippets via GLM (General Language Model) API (OpenAI-compatible)."""
+    return _generate_candidates_via_openai_compatible_api(
+        prompt=prompt,
+        n=n,
+        model=model,
+        debug=debug,
+        system_prompt=system_prompt,
+        expect_code=expect_code,
+        env_prefix="glm",
+        default_base="https://open.bigmodel.cn/api/paas/v4",
+        default_model="glm-4",
+        default_system_prompt=_DEFAULT_PHI_SYSTEM_PROMPT,
+    )
+
+
 def _resolve_llm_api_provider(preferred: Optional[str] = None) -> str:
-    candidates = {"deepseek", "kimi"}
+    candidates = {"deepseek", "kimi", "glm"}
     if preferred:
         candidate = preferred.strip().lower()
         if candidate in candidates:
@@ -505,18 +528,24 @@ def _resolve_llm_api_provider(preferred: Optional[str] = None) -> str:
         return "deepseek"
     if os.environ.get("KIMI_API_KEY"):
         return "kimi"
+    if os.environ.get("GLM_API_KEY"):
+        return "glm"
     return "deepseek"
 
 
 def _default_reasoner_model(provider: str) -> str:
     if provider == "kimi":
         return os.environ.get("KIMI_REASONER_MODEL") or os.environ.get("KIMI_MODEL") or "kimi-k2-thinking"
+    if provider == "glm":
+        return os.environ.get("GLM_REASONER_MODEL") or os.environ.get("GLM_MODEL") or "glm-4"
     return os.environ.get("DEEPSEEK_REASONER_MODEL") or os.environ.get("DEEPSEEK_MODEL") or "deepseek-reasoner"
 
 
 def _default_coder_model(provider: str) -> str:
     if provider == "kimi":
         return os.environ.get("KIMI_MODEL") or "kimi-k2-thinking"
+    if provider == "glm":
+        return os.environ.get("GLM_MODEL") or "glm-4"
     return os.environ.get("DEEPSEEK_MODEL") or "deepseek-chat"
 
 
@@ -531,6 +560,15 @@ def _generate_candidates_for_provider(
 ) -> List[str]:
     if provider == "kimi":
         return generate_candidates_via_kimi(
+            prompt=prompt,
+            n=n,
+            model=model,
+            debug=debug,
+            system_prompt=system_prompt,
+            expect_code=expect_code,
+        )
+    if provider == "glm":
+        return generate_candidates_via_glm(
             prompt=prompt,
             n=n,
             model=model,
@@ -555,10 +593,10 @@ def generate_candidates(
     ollama_model: Optional[str] = None,
     api_model: Optional[str] = None,
 ) -> List[str]:
-    """Unified LLM generation: prefer Ollama if available, otherwise DeepSeek or Kimi API.
+    """Unified LLM generation: prefer Ollama if available, otherwise DeepSeek, Kimi, or GLM API.
 
     - If `ollama_model` is provided, uses local Ollama.
-    - Else, uses the OpenAI-compatible provider selected by `LLM_API_PROVIDER` (default DeepSeek).
+    - Else, uses the OpenAI-compatible provider selected by `LLM_API_PROVIDER` (DeepSeek, Kimi, or GLM).
     """
     if ollama_model:
         try:
