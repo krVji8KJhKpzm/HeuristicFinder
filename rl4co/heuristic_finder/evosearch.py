@@ -1,11 +1,14 @@
 ﻿from __future__ import annotations
 
+import glob
+import json
 import os
 import random
 import re
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Set
 
 from rl4co.heuristic_finder.evaluate import train_fitness_phi_on_tsp20
@@ -63,6 +66,8 @@ class EvoConfig:
     gpu_ids: Optional[List[int]] = None
     # Optional dir to dump all candidate codes per generation
     dump_dir: Optional[str] = None
+    # Optional dir containing previous dump data for seeding
+    seed_dump_dir: Optional[str] = None
     # Optional fixed seed for reproducible short-training
     seed: Optional[int] = None
     # PBRS controls
@@ -100,6 +105,77 @@ def compile_candidates(codes: List[str]) -> List[PotentialSpec]:
             continue
         out.append(PotentialSpec(name=f"llm_{i}", code=code, fn=fn))
     return out
+
+
+def _load_seed_candidates(seed_dir: str, max_count: int, cfg: EvoConfig) -> List[Candidate]:
+    if not seed_dir or max_count <= 0 or not os.path.isdir(seed_dir):
+        return []
+    manifest_paths = sorted(glob.glob(os.path.join(seed_dir, "gen*.jsonl")))
+    if not manifest_paths:
+        return []
+    records: List[Dict[str, object]] = []
+    for manifest in manifest_paths:
+        try:
+            with open(manifest, encoding="utf-8") as mf:
+                for line in mf:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except Exception:
+            continue
+    if not records:
+        return []
+    records.sort(key=lambda r: float(r.get("score", float("-inf"))), reverse=True)
+    seeds: List[Candidate] = []
+    seen_hashes: Set[str] = set()
+    for idx, rec in enumerate(records):
+        if len(seeds) >= max_count:
+            break
+        file_name = rec.get("file")
+        if not file_name:
+            continue
+        path = os.path.join(seed_dir, file_name)
+        try:
+            code = Path(path).read_text(encoding="utf-8")
+        except Exception:
+            continue
+        try:
+            fn = compile_potential(code)
+        except Exception:
+            continue
+        code_hash = rec.get("code_hash")
+        if not code_hash:
+            try:
+                code_hash = compute_code_hash(code)
+            except Exception:
+                code_hash = None
+        if code_hash and code_hash in seen_hashes:
+            continue
+        if code_hash:
+            seen_hashes.add(code_hash)
+        gamma_val = None
+        if rec.get("gamma") is not None:
+            try:
+                gamma_val = float(rec["gamma"])
+            except Exception:
+                gamma_val = None
+        if gamma_val is None:
+            gamma_val = _init_gamma(cfg)
+        cand = Candidate(
+            spec=PotentialSpec(name=f"seed_{idx}", code=code, fn=fn),
+            gamma=gamma_val,
+            algorithm=rec.get("algorithm"),
+            thought=rec.get("thought"),
+            code_hash=code_hash,
+            stats=rec.get("stats"),
+            stats_text=rec.get("stats_text"),
+        )
+        seeds.append(cand)
+    return seeds
 
 
 def _mutate_gamma(parent_gamma: float, cfg: EvoConfig) -> float:
@@ -547,28 +623,48 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
     # Global dedup state and elite archive
     seen_global: Set[str] = set()
     archive = EliteArchive(top_k=cfg.archive_top_k, dump_dir=cfg.dump_dir)
+    seed_pool: List[Candidate] = []
+    if cfg.seed_dump_dir:
+        seed_pool = _load_seed_candidates(cfg.seed_dump_dir, n_pops * pop_size, cfg)
+        if seed_pool:
+            print(f"[INFO] Loaded {len(seed_pool)} seed candidates from {cfg.seed_dump_dir}")
 
     # Initialize populations independently
     populations: List[List[Tuple[Candidate, float]]] = []
     for pop_idx in range(n_pops):
-        total_init = pop_size * max(1, int(cfg.initial_copies))
-        init_codes = eoh_llm_i1(cfg.ollama_model, n=total_init, env_name="tsp", debug=False)
-        specs = compile_candidates(init_codes)
-        if not specs:
-            print(init_codes)
-            raise RuntimeError("LLM produced no valid initial candidates. Check provider, API key, and model.")
         init_cands: List[Candidate] = []
         seen_pop: Set[str] = set()
-        for s in specs:
-            th = extract_thought(s.code) if cfg.enable_thought else None
-            h = compute_code_hash(s.code)
+        while seed_pool and len(init_cands) < pop_size:
+            cand = seed_pool.pop(0)
+            h = cand.code_hash or compute_code_hash(cand.spec.code)
             if cfg.dedup_within_pop and h in seen_pop:
                 continue
             if cfg.dedup_global and h in seen_global:
                 continue
-            seen_pop.add(h)
-            seen_global.add(h)
-            init_cands.append(Candidate(spec=s, gamma=_init_gamma(cfg), algorithm=th, thought=th, code_hash=h))
+            if h:
+                seen_pop.add(h)
+                seen_global.add(h)
+            init_cands.append(cand)
+        if len(init_cands) < pop_size:
+            need_init = pop_size - len(init_cands)
+            total_init = need_init * max(1, int(cfg.initial_copies))
+            init_codes = eoh_llm_i1(cfg.ollama_model, n=total_init, env_name="tsp", debug=False)
+            specs = compile_candidates(init_codes)
+            if not specs:
+                print(init_codes)
+                raise RuntimeError("LLM produced no valid initial candidates. Check provider, API key, and model.")
+            for s in specs:
+                th = extract_thought(s.code) if cfg.enable_thought else None
+                h = compute_code_hash(s.code)
+                if cfg.dedup_within_pop and h in seen_pop:
+                    continue
+                if cfg.dedup_global and h in seen_global:
+                    continue
+                seen_pop.add(h)
+                seen_global.add(h)
+                init_cands.append(
+                    Candidate(spec=s, gamma=_init_gamma(cfg), algorithm=th, thought=th, code_hash=h)
+                )
         # Evaluate and keep top-N
         scored_init = _evaluate_population(init_cands, cfg)
         scored_init.sort(key=lambda x: x[1], reverse=True)
