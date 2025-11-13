@@ -95,6 +95,11 @@ def collect_tsp20_trajectories(
     else:
         model = POMO(env=base_env)
     model.eval()
+    # Ensure model is on the same device as tensors we generate
+    try:
+        model.to(torch.device(device))
+    except Exception:
+        pass
 
     episodes: List[Dict[str, Any]] = []
 
@@ -102,6 +107,13 @@ def collect_tsp20_trajectories(
     while n_remaining > 0:
         cur_bs = min(batch_size, n_remaining)
         td0 = base_env.reset(base_env.generator(batch_size=[cur_bs]).to(device))
+        # Safety: align td device with model parameters if needed
+        try:
+            pdev = next(model.parameters()).device
+            if pdev != td0.device:
+                td0 = td0.to(pdev)
+        except Exception:
+            pass
         with torch.no_grad():
             out = model.policy(td0, base_env, phase="val", return_actions=True, decode_type="greedy")
             actions = out["actions"]  # [B, T]
@@ -182,4 +194,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
