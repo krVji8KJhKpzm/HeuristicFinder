@@ -1,5 +1,5 @@
 ﻿from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Optional
 import os
 
 import torch
@@ -25,6 +25,9 @@ class TSPStateView:
     current_node: torch.Tensor  # [batch]
     first_node: torch.Tensor  # [batch]
     action_mask: torch.Tensor  # [batch, N], True if not yet visited
+    # Optional: prefix of visited path indices and its current length
+    path_prefix: Optional[torch.Tensor] = None  # [batch, N] long, -1 padded
+    path_length: Optional[torch.Tensor] = None  # [batch, 1] long
 
     def num_nodes(self) -> int:
         return self.locs.shape[-2]
@@ -76,6 +79,40 @@ class TSPStateView:
     def first_node_index(self) -> torch.Tensor:
         """Index of first node [batch]."""
         return self.first_node
+
+    # New helpers
+    def all_node_coords(self) -> torch.Tensor:
+        """Return coordinates of all nodes [batch, N, 2]."""
+        return self.locs
+
+    def partial_path_indices(self) -> torch.Tensor:
+        """Return the indices of the already visited path.
+
+        If a running path buffer exists, return shape [batch, N] long, filled by visit order
+        and padded with -1. Otherwise, derive from visited_mask (unordered) and pad.
+        """
+        device = self.locs.device
+        B = self.locs.shape[0]
+        N = self.locs.shape[-2]
+        out = torch.full((B, N), -1, dtype=torch.long, device=device)
+        if self.path_prefix is not None:
+            try:
+                src = self.path_prefix.to(device=device, dtype=torch.long)
+                # ensure shape [B, N]
+                if src.dim() == 1:
+                    src = src.unsqueeze(0)
+                K = min(src.shape[-1], N)
+                out[:, :K] = src[:, :K]
+                return out
+            except Exception:
+                pass
+        vm = self.visited_mask()
+        for b in range(B):
+            idx = torch.nonzero(vm[b], as_tuple=False).flatten()
+            k = min(idx.numel(), N)
+            if k > 0:
+                out[b, :k] = idx[:k]
+        return out
 
     # -------- Node-count-invariant helpers (fixed-size scalars/vectors) --------
     # def graph_scale(self) -> torch.Tensor:
@@ -217,7 +254,21 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
             current_node=td["current_node"],
             first_node=td["first_node"],
             action_mask=td["action_mask"],
+            path_prefix=td.get("path_prefix", None),
+            path_length=td.get("path_length", None),
         )
+
+    def _reset(self, td: Optional[TensorDict] = None, batch_size=None) -> TensorDict:
+        td_out = super()._reset(td, batch_size)
+        # Initialize path buffer
+        device = td_out["locs"].device
+        B = td_out["locs"].shape[0]
+        N = td_out["locs"].shape[-2]
+        path_prefix = torch.full((B, N), -1, dtype=torch.long, device=device)
+        path_length = torch.zeros((B, 1), dtype=torch.long, device=device)
+        td_out.set("path_prefix", path_prefix)
+        td_out.set("path_length", path_length)
+        return td_out
 
     def _step(self, td: TensorDict) -> TensorDict:
         # state view BEFORE transition
@@ -273,6 +324,24 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
                 "action_mask": available,
             }
         )
+
+        # Update path buffer (record chosen action at position equal to previous step index)
+        try:
+            B = td["locs"].shape[0]
+            N = td["locs"].shape[-2]
+            device = td.device
+            # previous step index per instance
+            k = td["i"].view(-1).to(torch.long)
+            pp = td.get("path_prefix", torch.full((B, N), -1, dtype=torch.long, device=device)).clone()
+            b_idx = torch.arange(pp.shape[0], device=pp.device)
+            cur = current_node.to(torch.long)
+            # clamp positions to valid range
+            k_clamped = torch.clamp(k, 0, N - 1)
+            pp[b_idx, k_clamped] = cur
+            td_next.set("path_prefix", pp)
+            td_next.set("path_length", torch.clamp(k_clamped + 1, max=N).view(-1, 1))
+        except Exception:
+            pass
 
         # state view AFTER transition
         sv_after = self._build_state_view(td_next)
@@ -389,3 +458,10 @@ class InvariantTSPStateView:
 
     def distance_matrix(self) -> torch.Tensor:
         return self._base.distance_matrix()
+
+    # New helpers pass-through
+    def all_node_coords(self) -> torch.Tensor:
+        return self._base.all_node_coords()
+
+    def partial_path_indices(self) -> torch.Tensor:
+        return self._base.partial_path_indices()

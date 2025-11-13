@@ -20,8 +20,8 @@ def format_prompt(env_name: str = "tsp", guidance: str = "") -> str:
         "Avoid Python loops; prefer vectorized torch ops.\n"
         "Available state helpers (batch-friendly):\n"
         "Raw N-dependent only (reduce to keep invariance): action_mask() -> [B,N] (True=unvisited); visited_mask() -> [B,N]; unvisited_mask() -> [B,N];\n"
-        "  current_node_index() -> [B]; first_node_index() -> [B];\n"
-        "  distance_matrix() -> [B,N,N] (diag=0).\n"
+        "  current_node_index() -> [B]; first_node_index() -> [B]; distance_matrix() -> [B,N,N] (diag=0).\n"
+        "  all_node_coords() -> [B,N,2]; partial_path_indices() -> [B,N] (visit order, -1 padded where missing).\n"
         "Do NOT use any other state.* helpers (e.g., visited_ratio, remaining_ratio, nearest/centroid/start distances, graph_scale, distances_from_current).\n"
         "Return a tensor broadcastable to [B,1]. Keep it simple and stable.\n"
         + guidance
