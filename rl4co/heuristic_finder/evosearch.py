@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Set
 
 from rl4co.heuristic_finder.evaluate import train_fitness_phi_on_tsp20
+from rl4co.heuristic_finder.potential_eval import cheap_score_phi, compute_phi_stats
+from rl4co.heuristic_finder.offline_data_tsp20 import load_offline_trajectories
 from rl4co.heuristic_finder.llm import (
     eoh_llm_i1,
     eoh_llm_e1,
@@ -61,7 +63,7 @@ class EvoConfig:
     operators: Optional[List[str]] = None  # e.g., ['e1','e2','m1','m2']
     operator_weights: Optional[List[float]] = None  # per-operator probability
     m_parents: int = 2  # number of parents for e1/e2
-    tournament_k: int = 2  # tournament size
+    tournament_k: int = 3  # tournament size
     # Optional: parallel short-training across multiple GPUs
     gpu_ids: Optional[List[int]] = None
     # Optional dir to dump all candidate codes per generation
@@ -89,8 +91,24 @@ class EvoConfig:
     memetic_repair_prob: float = 0.0  # chance to apply a light repair LLM pass
     # Elite archive
     archive_top_k: int = 8
-    elite_parent_k: int = 0
-    elite_replace_worst: int = 0
+    elite_parent_k: int = 2
+    elite_replace_worst: int = 1
+    # Level 1 / Level 2 multi-stage evaluation
+    offline_traj_path: str = "data/tsp20_offline_trajs.pt"
+    cheap_level_weight: float = 0.1
+    cheap_filter_threshold: float = -1e9
+    cheap_topk_ratio: float = 0.3
+    max_candidates_rl_eval: int = 8
+    # Phi statistical hard filters
+    max_step_shaping_ratio: float = 10.0
+    max_episode_shaping_ratio: float = 10.0
+    max_var_ratio_shaped_vs_base: float = 10.0
+    min_abs_dphi_q95: float = 1e-4
+    # Complexity regularization
+    complexity_penalty_alpha: float = 0.001
+    # Optional refine pass for elites per merge step
+    refine_top_k: int = 0
+    refine_epochs: int = 0
     # Diagnostics collection for reflection
     collect_stats: bool = True
     stats_batch_size: int = 64
@@ -690,6 +708,40 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
         scored_init = _evaluate_population(init_cands, cfg)
         scored_init.sort(key=lambda x: x[1], reverse=True)
         scored_init = scored_init[:pop_size]
+        # Optional refinement for top-k
+        if cfg.refine_top_k and cfg.refine_epochs and cfg.refine_top_k > 0 and cfg.refine_epochs > 0:
+            topk = min(int(cfg.refine_top_k), len(scored_init))
+            refined: List[Tuple[Candidate, float]] = []
+            for i in range(topk):
+                cand = scored_init[i][0]
+                try:
+                    sc_ref = train_fitness_phi_on_tsp20(
+                        cand.spec,
+                        epochs=int(cfg.refine_epochs),
+                        batch_size=cfg.batch_size,
+                        train_data_size=cfg.train_size,
+                        val_data_size=cfg.val_size,
+                        num_starts=cfg.num_starts,
+                        device=cfg.device,
+                        accelerator="cpu",
+                        devices=1,
+                        seed=cfg.seed,
+                        pbrs_gamma=cand.gamma,
+                        reward_scale=cfg.reward_scale,
+                        center_dphi=cfg.center_dphi,
+                        norm_dphi=cfg.norm_dphi,
+                    )
+                    # Combine with cheap score if available
+                    total = sc_ref
+                    if cand.stats is not None:
+                        # just keep consistency by reusing cheap weight as 0.0 contribution here
+                        pass
+                    refined.append((cand, float(total)))
+                except Exception:
+                    refined.append(scored_init[i])
+            # replace top segment
+            for i in range(len(refined)):
+                scored_init[i] = refined[i]
         _ensure_stats_for(scored_init, cfg)
         populations.append(scored_init)
         archive.update(scored_init)
@@ -757,6 +809,35 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
                 scored.sort(key=lambda x: x[1], reverse=True)
                 scored = scored[:pop_size]
                 _ensure_stats_for(scored, cfg)
+                # Optional refinement for top-k after merge
+                if cfg.refine_top_k and cfg.refine_epochs and cfg.refine_top_k > 0 and cfg.refine_epochs > 0:
+                    topk = min(int(cfg.refine_top_k), len(scored))
+                    refined: List[Tuple[Candidate, float]] = []
+                    for i in range(topk):
+                        cand = scored[i][0]
+                        try:
+                            sc_ref = train_fitness_phi_on_tsp20(
+                                cand.spec,
+                                epochs=int(cfg.refine_epochs),
+                                batch_size=cfg.batch_size,
+                                train_data_size=cfg.train_size,
+                                val_data_size=cfg.val_size,
+                                num_starts=cfg.num_starts,
+                                device=cfg.device,
+                                accelerator="cpu",
+                                devices=1,
+                                seed=cfg.seed,
+                                pbrs_gamma=cand.gamma,
+                                reward_scale=cfg.reward_scale,
+                                center_dphi=cfg.center_dphi,
+                                norm_dphi=cfg.norm_dphi,
+                            )
+                            total = sc_ref
+                            refined.append((cand, float(total)))
+                        except Exception:
+                            refined.append(scored[i])
+                    for i in range(len(refined)):
+                        scored[i] = refined[i]
                 # Optional elite replacement of worst
                 if cfg.elite_replace_worst > 0 and len(archive.entries) > 0:
                     k = min(cfg.elite_replace_worst, len(scored), len(archive.entries))
@@ -823,36 +904,128 @@ def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[C
     if not specs:
         return []
 
-    key2cand = {(c.spec.code, c.gamma): c for c in specs}
-    results: List[Tuple[Candidate, float]] = []
+    # ---------- Level 1: Cheap offline evaluation for all candidates ----------
+    offline_trajs = None
+    if cfg.offline_traj_path and os.path.exists(cfg.offline_traj_path):
+        try:
+            offline_trajs = load_offline_trajectories(cfg.offline_traj_path)
+        except Exception:
+            offline_trajs = None
 
+    meta: Dict[Tuple[str, float], Dict[str, object]] = {}
+    cheap_rank_list: List[Tuple[Candidate, float]] = []
+    for c in specs:
+        cheap_score = 0.0
+        stats_dict: Optional[Dict[str, float]] = None
+        complexity = 0.0
+        if offline_trajs is not None:
+            try:
+                s, stats, comp = cheap_score_phi(
+                    c.spec.fn,
+                    offline_trajs,
+                    c.gamma,
+                    config={
+                        "max_step_shaping_ratio": cfg.max_step_shaping_ratio,
+                        "max_episode_shaping_ratio": cfg.max_episode_shaping_ratio,
+                        "max_var_ratio_shaped_vs_base": cfg.max_var_ratio_shaped_vs_base,
+                        "min_abs_dphi_q95": cfg.min_abs_dphi_q95,
+                        "complexity_penalty_alpha": cfg.complexity_penalty_alpha,
+                    },
+                    code=c.spec.code,
+                )
+                cheap_score = float(s)
+                stats_dict = {
+                    "mean_dphi": stats.mean_dphi,
+                    "std_dphi": stats.std_dphi,
+                    "abs_dphi_q95": stats.abs_dphi_q95,
+                    "step_shaping_ratio": stats.step_shaping_ratio,
+                    "episode_shaping_ratio": stats.episode_shaping_ratio,
+                    "var_ratio_shaped_vs_base": stats.var_ratio_shaped_vs_base,
+                    "corr_dphi_future_cost": stats.corr_dphi_future_cost,
+                    "corr_phi0_final_reward": stats.corr_phi0_final_reward,
+                    "corr_sum_dphi_final_reward": stats.corr_sum_dphi_final_reward,
+                }
+                complexity = float(comp)
+            except Exception:
+                cheap_score = float("-1e6")
+                stats_dict = None
+                complexity = 0.0
+        else:
+            # No offline data: neutral cheap score
+            cheap_score = 0.0
+            stats_dict = None
+            complexity = 0.0
+
+        c.stats = stats_dict
+        c.stats_text = _summarize_stats(stats_dict) if stats_dict else None
+        meta[(c.spec.code, c.gamma)] = {
+            "cheap_score": cheap_score,
+            "complexity": complexity,
+            "stats": stats_dict,
+        }
+        cheap_rank_list.append((c, cheap_score))
+
+    # Filter by cheap_score threshold, then keep top-K for Level 2 RL eval
+    if offline_trajs is not None:
+        cheap_rank_list = [(c, s) for (c, s) in cheap_rank_list if s >= float(cfg.cheap_filter_threshold)]
+        cheap_rank_list.sort(key=lambda x: x[1], reverse=True)
+        allow_n = max(1, int(math.ceil((cfg.pop_size if cfg.pop_size is not None else cfg.population_size) * float(cfg.cheap_topk_ratio))))
+        allow_n = min(allow_n, int(cfg.max_candidates_rl_eval))
+        level2_set: List[Candidate] = [c for c, _ in cheap_rank_list[:allow_n]]
+    else:
+        # No offline trajectories: evaluate all in Level 2 to preserve original behavior
+        level2_set = list(specs)
+
+    # ---------- Level 2: Short RL eval for top-K; others get default poor RL score ----------
+    results: List[Tuple[Candidate, float]] = []
+    rl_scores: Dict[Tuple[str, float], float] = {}
+
+    def _finalize_score(cand: Candidate, rl_score: float) -> float:
+        m = meta.get((cand.spec.code, cand.gamma), {})
+        cheap = float(m.get("cheap_score", 0.0))
+        # combine
+        total = float(rl_score) + float(cfg.cheap_level_weight) * cheap
+        # optional soft penalties based on stats
+        st = m.get("stats") or {}
+        try:
+            vr = st.get("var_ratio_shaped_vs_base", None)
+            if vr is not None and math.isfinite(vr):
+                total -= 0.05 * max(0.0, float(vr) - 1.0)
+        except Exception:
+            pass
+        return float(total)
+
+    # If no GPUs provided, run sequentially
     gpu_ids = cfg.gpu_ids or []
     if not gpu_ids:
-        # sequential
         for c in specs:
-            score = train_fitness_phi_on_tsp20(
-                c.spec,
-                epochs=cfg.epochs_per_eval,
-                batch_size=cfg.batch_size,
-                train_data_size=cfg.train_size,
-                val_data_size=cfg.val_size,
-                num_starts=cfg.num_starts,
-                device=cfg.device,
-                accelerator="cpu",
-                devices=1,
-                seed=cfg.seed,
-                pbrs_gamma=c.gamma,
-                reward_scale=cfg.reward_scale,
-                center_dphi=cfg.center_dphi,
-                norm_dphi=cfg.norm_dphi,
-            )
-            tour_len = -float(score)
-            if tour_len > float(cfg.objective_bad_threshold):
-                score = float("-inf")
-            results.append((c, score))
+            if c in level2_set:
+                score = train_fitness_phi_on_tsp20(
+                    c.spec,
+                    epochs=cfg.epochs_per_eval,
+                    batch_size=cfg.batch_size,
+                    train_data_size=cfg.train_size,
+                    val_data_size=cfg.val_size,
+                    num_starts=cfg.num_starts,
+                    device=cfg.device,
+                    accelerator="cpu",
+                    devices=1,
+                    seed=cfg.seed,
+                    pbrs_gamma=c.gamma,
+                    reward_scale=cfg.reward_scale,
+                    center_dphi=cfg.center_dphi,
+                    norm_dphi=cfg.norm_dphi,
+                )
+                tour_len = -float(score)
+                if tour_len > float(cfg.objective_bad_threshold):
+                    score = float("-inf")
+            else:
+                score = float(-1e6)  # default poor RL score for filtered-out candidates
+            total = _finalize_score(c, score)
+            results.append((c, total))
         return results
 
-    # parallel across provided GPU ids
+    # parallel across provided GPU ids for level2_set only
     cfgd = {
         "epochs_per_eval": cfg.epochs_per_eval,
         "batch_size": cfg.batch_size,
@@ -866,18 +1039,23 @@ def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[C
         "norm_dphi": cfg.norm_dphi,
         "objective_bad_threshold": cfg.objective_bad_threshold,
     }
-    # use 'spawn' to avoid CUDA + fork issues on Linux/Windows
+    key2cand = {(c.spec.code, c.gamma): c for c in level2_set}
     ctx = mp.get_context("spawn")
     with ProcessPoolExecutor(max_workers=len(gpu_ids), mp_context=ctx) as ex:
         futs = []
-        for i, c in enumerate(specs):
+        for i, c in enumerate(level2_set):
             gpu_id = gpu_ids[i % len(gpu_ids)]
             futs.append(ex.submit(_worker_eval, ((c.spec.code, c.gamma), cfgd, gpu_id)))
         for f in as_completed(futs):
             key, score = f.result()
-            cand = key2cand.get(key)
-            if cand is not None:
-                results.append((cand, score))
+            rl_scores[key] = score
+
+    # Combine all candidates with their RL or default score
+    for c in specs:
+        key = (c.spec.code, c.gamma)
+        rl_sc = rl_scores.get(key, float(-1e6))
+        total = _finalize_score(c, rl_sc)
+        results.append((c, total))
     return results
 
 
