@@ -132,12 +132,14 @@ def collect_tsp20_trajectories(
             # Collect sequences
             curr_nodes: List[int] = []
             masks: List[torch.Tensor] = []
-            # Step through using env._step to update masks
-            tdb = TensorDict({k: v[b].clone() for k, v in td.items()}, batch_size=[])
+            # Step through using env._step to update masks; keep batch dimension 1
+            tdb = td[b:b+1].clone()
             for t in range(T):
-                curr_nodes.append(int(tdb["current_node"].item()))
-                masks.append(tdb["action_mask"].clone())
-                tdb.set("action", acts_b[t])
+                curr_nodes.append(int(tdb["current_node"][0].item()))
+                masks.append(tdb["action_mask"][0].clone())
+                # set action with batch dim
+                act_t = acts_b[t].to(dtype=torch.long, device=tdb.device).unsqueeze(0)
+                tdb.set("action", act_t)
                 tdb = env._step(tdb)
             # Base step rewards (negative edge length)
             base_steps = _negative_edge_lengths(locs_b, acts_b)
