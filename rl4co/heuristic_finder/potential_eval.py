@@ -41,15 +41,39 @@ def _pearsonr(x: torch.Tensor, y: torch.Tensor) -> Optional[float]:
     return float(r.item())
 
 
-def _build_state_view(locs: torch.Tensor, i: int, current_node: int, first_node: int, action_mask: torch.Tensor) -> TSPStateView:
+def _build_state_view(
+    locs: torch.Tensor,
+    i: int,
+    current_node: int,
+    first_node: int,
+    action_mask: torch.Tensor,
+    device: torch.device,
+    ) -> TSPStateView:
     # Shapes match pbrs_env.TSPStateView expectations
     B = 1
     return TSPStateView(
-        locs=locs.unsqueeze(0),
-        i=torch.tensor([[i]], dtype=torch.int64),
-        current_node=torch.tensor([current_node], dtype=torch.int64),
-        first_node=torch.tensor([first_node], dtype=torch.int64),
-        action_mask=action_mask.unsqueeze(0).to(torch.bool),
+        locs=locs.unsqueeze(0).to(device),
+        i=torch.tensor([[i]], dtype=torch.int64, device=device),
+        current_node=torch.tensor([current_node], dtype=torch.int64, device=device),
+        first_node=torch.tensor([first_node], dtype=torch.int64, device=device),
+        action_mask=action_mask.unsqueeze(0).to(torch.bool).to(device),
+    )
+
+
+def _build_batched_state_view(
+    locs: torch.Tensor,           # [B, N, 2]
+    i: torch.Tensor,              # [B]
+    current_node: torch.Tensor,   # [B]
+    first_node: torch.Tensor,     # [B]
+    action_mask: torch.Tensor,    # [B, N]
+    device: torch.device,
+) -> TSPStateView:
+    return TSPStateView(
+        locs=locs.to(device),
+        i=i.view(-1, 1).to(torch.int64, device=device),
+        current_node=current_node.to(torch.int64, device=device),
+        first_node=first_node.to(torch.int64, device=device),
+        action_mask=action_mask.to(torch.bool, device=device),
     )
 
 
@@ -57,79 +81,155 @@ def compute_phi_stats(
     phi_fn: Callable[[InvariantTSPStateView], torch.Tensor],
     trajectories: Dict[str, Any],
     gamma: float,
+    device: str | torch.device = "cpu",
+    batch_states: Optional[int] = None,
 ) -> PhiStats:
     episodes: List[Dict[str, Any]] = trajectories["episodes"]
-    dphi_vals: List[float] = []
-    r_vals: List[float] = []
-    rp_vals: List[float] = []
-    # For correlations
-    dphi_all: List[float] = []
-    future_cost_all: List[float] = []
-    sum_dphi_per_ep: List[float] = []
-    final_reward_per_ep: List[float] = []
+    device = torch.device(device)
+    bs = int(batch_states) if batch_states else 4096
 
-    for ep in episodes:
+    # Accumulators
+    dphi_chunks: List[torch.Tensor] = []  # step-level
+    r_chunks: List[torch.Tensor] = []
+    rp_chunks: List[torch.Tensor] = []
+    future_cost_chunks: List[torch.Tensor] = []
+    final_reward_per_ep: List[float] = []
+    sum_dphi_per_ep: List[float] = [0.0 for _ in range(len(episodes))]
+    phi0_vals: List[float] = []
+
+    # State buffers for batched phi evaluation
+    b_locs: List[torch.Tensor] = []
+    b_i: List[int] = []
+    b_curr: List[int] = []
+    b_first: List[int] = []
+    b_mask: List[torch.Tensor] = []
+    a_locs: List[torch.Tensor] = []
+    a_i: List[int] = []
+    a_curr: List[int] = []
+    a_first: List[int] = []
+    a_mask: List[torch.Tensor] = []
+    step_r: List[float] = []
+    step_ep_idx: List[int] = []
+    step_future_cost: List[float] = []
+
+    def _flush():
+        if not b_locs:
+            return
+        with torch.no_grad():
+            locs_b = torch.stack(b_locs, dim=0).to(device)
+            i_b = torch.tensor(b_i, dtype=torch.int64, device=device)
+            cur_b = torch.tensor(b_curr, dtype=torch.int64, device=device)
+            fir_b = torch.tensor(b_first, dtype=torch.int64, device=device)
+            m_b = torch.stack(b_mask, dim=0).to(torch.bool).to(device)
+
+            locs_a = torch.stack(a_locs, dim=0).to(device)
+            i_a = torch.tensor(a_i, dtype=torch.int64, device=device)
+            cur_a = torch.tensor(a_curr, dtype=torch.int64, device=device)
+            fir_a = torch.tensor(a_first, dtype=torch.int64, device=device)
+            m_a = torch.stack(a_mask, dim=0).to(torch.bool).to(device)
+
+            sv_b = _build_batched_state_view(locs_b, i_b, cur_b, fir_b, m_b, device)
+            sv_a = _build_batched_state_view(locs_a, i_a, cur_a, fir_a, m_a, device)
+            inv_b = InvariantTSPStateView(sv_b)
+            inv_a = InvariantTSPStateView(sv_a)
+            phi_b = phi_fn(inv_b)
+            phi_a = phi_fn(inv_a)
+            if not isinstance(phi_b, torch.Tensor):
+                phi_b = torch.as_tensor(phi_b, dtype=torch.float32, device=device)
+            if not isinstance(phi_a, torch.Tensor):
+                phi_a = torch.as_tensor(phi_a, dtype=torch.float32, device=device)
+            phi_b = torch.nan_to_num(phi_b, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32)
+            phi_a = torch.nan_to_num(phi_a, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32)
+            if phi_b.dim() > 1:
+                phi_b = phi_b.squeeze(-1)
+            if phi_a.dim() > 1:
+                phi_a = phi_a.squeeze(-1)
+            dphi = (phi_a - phi_b).view(-1)
+
+            r_batch = torch.tensor(step_r, dtype=torch.float32, device=device)
+            rp_batch = r_batch + float(gamma) * dphi
+
+            # Accumulate per-episode sums
+            for idx, dv in zip(step_ep_idx, dphi.tolist()):
+                sum_dphi_per_ep[idx] += float(dv)
+
+            # Store chunks on CPU
+            dphi_chunks.append(dphi.detach().to("cpu"))
+            r_chunks.append(r_batch.detach().to("cpu"))
+            rp_chunks.append(rp_batch.detach().to("cpu"))
+            future_cost_chunks.append(torch.tensor(step_future_cost, dtype=torch.float32))
+
+        # Clear buffers
+        b_locs.clear(); b_i.clear(); b_curr.clear(); b_first.clear(); b_mask.clear()
+        a_locs.clear(); a_i.clear(); a_curr.clear(); a_first.clear(); a_mask.clear()
+        step_r.clear(); step_ep_idx.clear(); step_future_cost.clear()
+
+    # Compute phi0 per episode (batched once)
+    with torch.no_grad():
+        if len(episodes) > 0:
+            locs0 = torch.stack([ep["locs"].to(torch.float32) for ep in episodes], dim=0).to(device)
+            i0 = torch.zeros((len(episodes),), dtype=torch.int64, device=device)
+            curr0 = torch.stack([ep["current_nodes"][0].to(torch.long) for ep in episodes]).to(device)
+            first0 = torch.tensor([int(ep["first_node"]) for ep in episodes], dtype=torch.int64, device=device)
+            mask0 = torch.stack([ep["action_masks"][0].to(torch.bool) for ep in episodes], dim=0).to(device)
+            sv0 = _build_batched_state_view(locs0, i0, curr0, first0, mask0, device)
+            inv0 = InvariantTSPStateView(sv0)
+            phi0 = phi_fn(inv0)
+            if not isinstance(phi0, torch.Tensor):
+                phi0 = torch.as_tensor(phi0, dtype=torch.float32, device=device)
+            phi0 = torch.nan_to_num(phi0, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32)
+            if phi0.dim() > 1:
+                phi0 = phi0.squeeze(-1)
+            phi0_vals = phi0.detach().to("cpu").view(-1).tolist()
+
+    # Iterate episodes, fill buffers and flush in chunks
+    for ep_idx, ep in enumerate(episodes):
+        final_reward_per_ep.append(float(ep["final_reward"]))
         locs = ep["locs"].to(torch.float32)
-        first_node = int(ep["first_node"])
         actions = ep["actions"].to(torch.long)
         current_nodes = ep["current_nodes"].to(torch.long)
         masks = ep["action_masks"].to(torch.bool)
-        r_base = ep["base_step_reward"].to(torch.float32)  # negative edge length
-        final_reward = float(ep["final_reward"])  # negative tour length
+        r_base = ep["base_step_reward"].to(torch.float32)
         T = actions.shape[0]
-
-        # Precompute cumulative future cost (positive cost): we use -r_base as cost per step
-        # future_cost[t] = sum_{k=t}^{T-1} (-r_k)
+        # future cost per-step on CPU
         cost_steps = (-r_base).flatten()
         future_cost = torch.flip(torch.cumsum(torch.flip(cost_steps, dims=[0]), dim=0), dims=[0])
 
-        sum_dphi = 0.0
         for t in range(T):
-            # before state
-            sv_before = _build_state_view(locs, t, int(current_nodes[t].item()), first_node, masks[t])
-            inv_before = InvariantTSPStateView(sv_before)
-            phi_b = phi_fn(inv_before)
-            if not isinstance(phi_b, torch.Tensor):
-                phi_b = torch.as_tensor(phi_b, dtype=torch.float32)
-            phi_b = torch.nan_to_num(phi_b, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32)
-            if phi_b.dim() > 0:
-                phi_b = phi_b.view(-1)[0]
-
-            # after state (advance one step)
+            # before
+            b_locs.append(locs)
+            b_i.append(t)
+            b_curr.append(int(current_nodes[t].item()))
+            b_first.append(int(ep["first_node"]))
+            b_mask.append(masks[t])
+            # after
             next_i = t + 1
             next_curr = int(actions[t].item())
-            # update mask: mark the chosen node as visited
             mask_next = masks[t].clone()
             mask_next[next_curr] = False
-            sv_after = _build_state_view(locs, next_i, next_curr, first_node, mask_next)
-            inv_after = InvariantTSPStateView(sv_after)
-            phi_a = phi_fn(inv_after)
-            if not isinstance(phi_a, torch.Tensor):
-                phi_a = torch.as_tensor(phi_a, dtype=torch.float32)
-            phi_a = torch.nan_to_num(phi_a, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32)
-            if phi_a.dim() > 0:
-                phi_a = phi_a.view(-1)[0]
+            a_locs.append(locs)
+            a_i.append(next_i)
+            a_curr.append(next_curr)
+            a_first.append(int(ep["first_node"]))
+            a_mask.append(mask_next)
+            # meta
+            step_r.append(float(r_base[t].item()))
+            step_ep_idx.append(ep_idx)
+            step_future_cost.append(float(future_cost[t].item()))
 
-            dphi = float((phi_a - phi_b).item())
-            r = float(r_base[t].item())
-            r_prime = r + float(gamma) * dphi
-            dphi_vals.append(dphi)
-            r_vals.append(r)
-            rp_vals.append(r_prime)
+            if len(b_locs) >= bs:
+                _flush()
 
-            dphi_all.append(dphi)
-            future_cost_all.append(float(future_cost[t].item()))
-            sum_dphi += dphi
+    # flush remainder
+    _flush()
 
-        sum_dphi_per_ep.append(sum_dphi)
-        final_reward_per_ep.append(final_reward)
-
-    if len(dphi_vals) == 0:
+    if len(dphi_chunks) == 0:
         return PhiStats(0.0, 0.0, 0.0, math.inf, math.inf, math.inf, None, None, None)
 
-    dphi_t = torch.as_tensor(dphi_vals, dtype=torch.float32)
-    r_t = torch.as_tensor(r_vals, dtype=torch.float32)
-    rp_t = torch.as_tensor(rp_vals, dtype=torch.float32)
+    dphi_t = torch.cat(dphi_chunks, dim=0)
+    r_t = torch.cat(r_chunks, dim=0)
+    rp_t = torch.cat(rp_chunks, dim=0)
+    future_cost_all = torch.cat(future_cost_chunks, dim=0)
 
     mean_dphi = float(dphi_t.mean().item())
     std_dphi = float(dphi_t.std(unbiased=False).item())
@@ -152,10 +252,13 @@ def compute_phi_stats(
     var_ratio_shaped_vs_base = shaped_var / base_var if base_var > 0 else math.inf
 
     # Correlations
-    corr_dphi_future_cost = None
-    if len(dphi_all) > 1 and len(future_cost_all) > 1:
-        corr_dphi_future_cost = _pearsonr(torch.tensor(dphi_all), torch.tensor(future_cost_all))
-    corr_phi0_final_reward = _pearsonr(torch.tensor([0.0]*len(final_reward_per_ep)), torch.tensor(final_reward_per_ep)) if final_reward_per_ep else None
+    corr_dphi_future_cost = _pearsonr(dphi_t, future_cost_all) if dphi_t.numel() > 1 and future_cost_all.numel() > 1 else None
+    corr_phi0_final_reward = None
+    if len(phi0_vals) == len(final_reward_per_ep) and len(phi0_vals) > 1:
+        corr_phi0_final_reward = _pearsonr(
+            torch.tensor(phi0_vals, dtype=torch.float32),
+            torch.tensor(final_reward_per_ep, dtype=torch.float32),
+        )
     corr_sum_dphi_final_reward = _pearsonr(sum_dphi_t, final_reward_t) if final_reward_t.numel() > 1 else None
 
     return PhiStats(
@@ -193,7 +296,10 @@ def cheap_score_phi(
 
     Returns (score, stats, complexity).
     """
-    stats = compute_phi_stats(phi_fn, trajectories, gamma)
+    # Device selection for cheap eval
+    dev = config.get("cheap_eval_device", "cpu")
+    bs = config.get("cheap_eval_batch_states", None)
+    stats = compute_phi_stats(phi_fn, trajectories, gamma, device=dev, batch_states=bs)
 
     # Hard filters
     max_step = float(config.get("max_step_shaping_ratio", 10.0))
@@ -234,4 +340,3 @@ def cheap_score_phi(
     score -= float(config.get("complexity_penalty_alpha", 0.001)) * complexity
 
     return float(score), stats, float(complexity)
-

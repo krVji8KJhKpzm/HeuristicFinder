@@ -100,6 +100,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-var-ratio-shaped-vs-base", type=float, default=10.0)
     p.add_argument("--min-abs-dphi-q95", type=float, default=1e-4)
     p.add_argument("--complexity-penalty-alpha", type=float, default=0.001)
+    p.add_argument("--cheap-eval-device", type=str, default="cpu")
+    p.add_argument("--cheap-eval-batch-states", type=int, default=4096)
     p.add_argument("--refine-top-k", type=int, default=0)
     p.add_argument("--refine-epochs", type=int, default=0)
 
@@ -173,6 +175,8 @@ def main():
         max_var_ratio_shaped_vs_base=float(args.max_var_ratio_shaped_vs_base),
         min_abs_dphi_q95=float(args.min_abs_dphi_q95),
         complexity_penalty_alpha=float(args.complexity_penalty_alpha),
+        cheap_eval_device=str(args.cheap_eval_device),
+        cheap_eval_batch_states=int(args.cheap_eval_batch_states),
         refine_top_k=int(args.refine_top_k),
         refine_epochs=int(args.refine_epochs),
     )

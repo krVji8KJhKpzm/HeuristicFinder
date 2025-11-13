@@ -61,6 +61,8 @@ OFFLINE_TRAJ_PATH=${OFFLINE_TRAJ_PATH:-data/tsp20_offline_trajs.pt}
 OFFLINE_NUM_EPISODES=${OFFLINE_NUM_EPISODES:-100000}
 OFFLINE_BATCH_SIZE=${OFFLINE_BATCH_SIZE:-512}
 BASELINE_CKPT=${BASELINE_CKPT:-baseline.ckpt}
+CHEAP_EVAL_DEVICE=${CHEAP_EVAL_DEVICE:-cuda}
+CHEAP_EVAL_BATCH_STATES=${CHEAP_EVAL_BATCH_STATES:-8192}
 
 # Generate offline data if missing
 if [[ ! -f "$OFFLINE_TRAJ_PATH" ]]; then
@@ -106,17 +108,19 @@ cmd=(python examples/auto_find_phi_tsp20.py
   --topk "$TOPK"
   --seed "$SEED"
   --offline-traj-path "$OFFLINE_TRAJ_PATH"
-  --cheap-level-weight "${CHEAP_LEVEL_WEIGHT:-0.1}"
-  --cheap-filter-threshold "${CHEAP_FILTER_THRESHOLD:--1e9}"
-  --cheap-topk-ratio "${CHEAP_TOPK_RATIO:-0.3}"
-  --max-candidates-rl-eval "${MAX_CANDIDATES_RL_EVAL:-8}"
-  --max-step-shaping-ratio "${MAX_STEP_SHAPING_RATIO:-10.0}"
-  --max-episode-shaping-ratio "${MAX_EPISODE_SHAPING_RATIO:-10.0}"
-  --max-var-ratio-shaped-vs-base "${MAX_VAR_RATIO_SHAPED_VS_BASE:-10.0}"
-  --min-abs-dphi-q95 "${MIN_ABS_DPHI_Q95:-1e-4}"
-  --complexity-penalty-alpha "${COMPLEXITY_PENALTY_ALPHA:-0.001}"
-  --refine-top-k "${REFINE_TOP_K:-5}"
-  --refine-epochs "${REFINE_EPOCHS:-10}"
+  --cheap-level-weight="${CHEAP_LEVEL_WEIGHT:-0.1}"
+  --cheap-filter-threshold="${CHEAP_FILTER_THRESHOLD:--1e9}"
+  --cheap-topk-ratio="${CHEAP_TOPK_RATIO:-0.3}"
+  --max-candidates-rl-eval="${MAX_CANDIDATES_RL_EVAL:-8}"
+  --max-step-shaping-ratio="${MAX_STEP_SHAPING_RATIO:-10.0}"
+  --max-episode-shaping-ratio="${MAX_EPISODE_SHAPING_RATIO:-10.0}"
+  --max-var-ratio-shaped-vs-base="${MAX_VAR_RATIO_SHAPED_VS_BASE:-10.0}"
+  --min-abs-dphi-q95="${MIN_ABS_DPHI_Q95:-1e-4}"
+  --complexity-penalty-alpha="${COMPLEXITY_PENALTY_ALPHA:-0.001}"
+  --cheap-eval-device "${CHEAP_EVAL_DEVICE}"
+  --cheap-eval-batch-states "${CHEAP_EVAL_BATCH_STATES}"
+  --refine-top-k="${REFINE_TOP_K:-5}"
+  --refine-epochs="${REFINE_EPOCHS:-10}"
 )
 
 if [[ "${CENTER_DPHI}" == "1" ]]; then cmd+=(--center-dphi); fi

@@ -109,6 +109,9 @@ class EvoConfig:
     # Optional refine pass for elites per merge step
     refine_top_k: int = 0
     refine_epochs: int = 0
+    # Device for cheap Level-1 eval
+    cheap_eval_device: str = "cpu"
+    cheap_eval_batch_states: Optional[int] = 4096
     # Diagnostics collection for reflection
     collect_stats: bool = True
     stats_batch_size: int = 64
@@ -930,6 +933,8 @@ def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[C
                         "max_var_ratio_shaped_vs_base": cfg.max_var_ratio_shaped_vs_base,
                         "min_abs_dphi_q95": cfg.min_abs_dphi_q95,
                         "complexity_penalty_alpha": cfg.complexity_penalty_alpha,
+                        "cheap_eval_device": cfg.cheap_eval_device,
+                        "cheap_eval_batch_states": cfg.cheap_eval_batch_states,
                     },
                     code=c.spec.code,
                 )
