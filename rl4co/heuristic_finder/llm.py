@@ -336,32 +336,67 @@ def _generate_candidates_via_openai_compatible_api(
             try:
                 import requests  # type: ignore
 
-                resp = requests.post(url, headers=headers, json=payload, timeout=(10, 300))
-                resp.raise_for_status()
-                
                 if stream:
-                    # Handle streaming response
-                    raw = ""
-                    for line in resp.iter_lines():
-                        if line:
-                            line_str = line.decode('utf-8')
-                            if line_str.startswith('data: '):
-                                data_str = line_str[6:]  # Remove 'data: ' prefix
-                                if data_str == '[DONE]':
+                    headers = {
+                        **headers,
+                        "Accept": "text/event-stream",
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                    }
+
+                timeout = (10, 300)
+
+                with requests.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=timeout,
+                    stream=stream,
+                ) as resp:
+                    resp.raise_for_status()
+
+                    if stream:
+                        event_buf = []
+                        raw_acc = ""
+                        for raw_line in resp.iter_lines(decode_unicode=True):
+                            if raw_line is None:
+                                continue
+                            line = raw_line.strip()
+                            if line == "":
+                                if not event_buf:
+                                    continue
+                                data_lines = [l[5:].lstrip() for l in event_buf if l.startswith("data:")]
+                                event_buf.clear()
+                                if not data_lines:
+                                    continue
+                                data_str = "\n".join(data_lines)
+                                if data_str.strip() == "[DONE]":
                                     break
                                 try:
-                                    chunk_data = json.loads(data_str)
-                                    choices = chunk_data.get("choices", [])
-                                    if choices:
-                                        delta = choices[0].get("delta", {})
-                                        content = delta.get("content", "")
-                                        if content:
-                                            raw += content
+                                    chunk = json.loads(data_str)
                                 except json.JSONDecodeError:
                                     continue
-                    data = {"choices": [{"message": {"content": raw}}]}
-                else:
-                    data = resp.json()
+
+                                choices = chunk.get("choices", [])
+                                if choices:
+                                    delta = choices[0].get("delta", {}) or {}
+                                    piece = delta.get("content") or ""
+                                    piece_rc = delta.get("reasoning_content") or ""
+                                    if piece_rc:
+                                        piece = piece_rc + piece
+
+                                    if piece:
+                                        raw_acc += piece
+                                        print(piece, end="", flush=True)
+                                continue
+                            if line.startswith(":"):
+                                continue
+
+                            event_buf.append(line)
+
+                        data = {"choices": [{"message": {"content": raw_acc}}]}
+                    else:
+                        data = resp.json()
 
                 print(f"Request cost time: {time.time() - start_time} (s)", flush=True)
             except Exception as e:
@@ -425,32 +460,91 @@ def _generate_candidates_via_openai_compatible_api(
                     try:
                         import requests  # type: ignore
 
-                        r2 = requests.post(url, headers=headers, json=repair_payload, timeout=60)
-                        r2.raise_for_status()
+                        # r2 = requests.post(url, headers=headers, json=repair_payload, timeout=60)
+                        # r2.raise_for_status()
                         
+                        # if stream:
+                        #     # Handle streaming response for repair
+                        #     r2_raw = ""
+                        #     for line in r2.iter_lines():
+                        #         if line:
+                        #             line_str = line.decode('utf-8')
+                        #             if line_str.startswith('data: '):
+                        #                 data_str = line_str[6:]
+                        #                 if data_str == '[DONE]':
+                        #                     break
+                        #                 try:
+                        #                     chunk_data = json.loads(data_str)
+                        #                     choices = chunk_data.get("choices", [])
+                        #                     if choices:
+                        #                         delta = choices[0].get("delta", {})
+                        #                         content = delta.get("content", "")
+                        #                         if content:
+                        #                             r2_raw += content
+                        #                 except json.JSONDecodeError:
+                        #                     continue
+                        #     d2 = {"choices": [{"message": {"content": r2_raw}}]}
+                        # else:
+                        #     d2 = r2.json()
                         if stream:
-                            # Handle streaming response for repair
-                            r2_raw = ""
-                            for line in r2.iter_lines():
-                                if line:
-                                    line_str = line.decode('utf-8')
-                                    if line_str.startswith('data: '):
-                                        data_str = line_str[6:]
-                                        if data_str == '[DONE]':
+                            headers = {
+                                **headers,
+                                "Accept": "text/event-stream",
+                                "Cache-Control": "no-cache",
+                                "Connection": "keep-alive",
+                            }
+
+                        with requests.post(
+                            url,
+                            headers=headers,
+                            json=payload,
+                            timeout=timeout,
+                            stream=stream,
+                        ) as r2:
+                            r2.raise_for_status()
+
+                            if stream:
+                                event_buf = []
+                                raw_acc = ""
+                                for raw_line in r2.iter_lines(decode_unicode=True):
+                                    if raw_line is None:
+                                        continue
+                                    line = raw_line.strip()
+                                    if line == "":
+                                        if not event_buf:
+                                            continue
+                                        data_lines = [l[5:].lstrip() for l in event_buf if l.startswith("data:")]
+                                        event_buf.clear()
+                                        if not data_lines:
+                                            continue
+                                        data_str = "\n".join(data_lines)
+                                        if data_str.strip() == "[DONE]":
                                             break
                                         try:
-                                            chunk_data = json.loads(data_str)
-                                            choices = chunk_data.get("choices", [])
-                                            if choices:
-                                                delta = choices[0].get("delta", {})
-                                                content = delta.get("content", "")
-                                                if content:
-                                                    r2_raw += content
+                                            chunk = json.loads(data_str)
                                         except json.JSONDecodeError:
                                             continue
-                            d2 = {"choices": [{"message": {"content": r2_raw}}]}
-                        else:
-                            d2 = r2.json()
+
+                                        choices = chunk.get("choices", [])
+                                        if choices:
+                                            delta = choices[0].get("delta", {}) or {}
+                                            piece = delta.get("content") or ""
+                                            piece_rc = delta.get("reasoning_content") or ""
+                                            if piece_rc:
+                                                piece = piece_rc + piece
+
+                                            if piece:
+                                                raw_acc += piece
+                                                print(piece, end="", flush=True)
+                                        continue
+                                    if line.startswith(":"):
+                                        continue
+
+                                    event_buf.append(line)
+
+                                d2 = {"choices": [{"message": {"content": raw_acc}}]}
+                            else:
+                                d2 = resp.json()
                     except Exception:
                         import urllib.request
                         import urllib.error
