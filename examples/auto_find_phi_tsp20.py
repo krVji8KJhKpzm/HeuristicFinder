@@ -50,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--generations", type=int, default=2, help="# evolutionary generations")
     p.add_argument("--operators", type=str, default="e1,e2,m1,m2", help="comma list of operators")
     p.add_argument("--operator-weights", type=str, default=None, help="comma list of per-operator probabilities")
-    p.add_argument("--tournament-k", type=int, default=2, help="Tournament size")
+    p.add_argument("--tournament-k", type=int, default=3, help="Tournament size")
     p.add_argument("--epochs-per-eval", type=int, default=1)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--train-size", type=int, default=1000)
@@ -86,8 +86,22 @@ def parse_args() -> argparse.Namespace:
     p.set_defaults(dedup_within_pop=True)
     p.add_argument("--memetic-repair-prob", type=float, default=0.0, help="Prob. to apply light repair to offspring")
     p.add_argument("--archive-top-k", type=int, default=8, help="Top-K to keep in elite archive")
-    p.add_argument("--elite-parent-k", type=int, default=0, help="Inject K elites into parent pool")
-    p.add_argument("--elite-replace-worst", type=int, default=0, help="Replace worst K with elites after merge")
+    p.add_argument("--elite-parent-k", type=int, default=2, help="Inject K elites into parent pool")
+    p.add_argument("--elite-replace-worst", type=int, default=1, help="Replace worst K with elites after merge")
+
+    # Level 1 / Level 2 multi-stage config
+    p.add_argument("--offline-traj-path", type=str, default="data/tsp20_offline_trajs.pt")
+    p.add_argument("--cheap-level-weight", type=float, default=0.1)
+    p.add_argument("--cheap-filter-threshold", type=float, default=-1e9)
+    p.add_argument("--cheap-topk-ratio", type=float, default=0.3)
+    p.add_argument("--max-candidates-rl-eval", type=int, default=8)
+    p.add_argument("--max-step-shaping-ratio", type=float, default=10.0)
+    p.add_argument("--max-episode-shaping-ratio", type=float, default=10.0)
+    p.add_argument("--max-var-ratio-shaped-vs-base", type=float, default=10.0)
+    p.add_argument("--min-abs-dphi-q95", type=float, default=1e-4)
+    p.add_argument("--complexity-penalty-alpha", type=float, default=0.001)
+    p.add_argument("--refine-top-k", type=int, default=0)
+    p.add_argument("--refine-epochs", type=int, default=0)
 
     # Train after search
     p.add_argument("--train-after", action="store_true")
@@ -149,6 +163,18 @@ def main():
         archive_top_k=int(args.archive_top_k),
         elite_parent_k=int(args.elite_parent_k),
         elite_replace_worst=int(args.elite_replace_worst),
+        offline_traj_path=args.offline_traj_path,
+        cheap_level_weight=float(args.cheap_level_weight),
+        cheap_filter_threshold=float(args.cheap_filter_threshold),
+        cheap_topk_ratio=float(args.cheap_topk_ratio),
+        max_candidates_rl_eval=int(args.max_candidates_rl_eval),
+        max_step_shaping_ratio=float(args.max_step_shaping_ratio),
+        max_episode_shaping_ratio=float(args.max_episode_shaping_ratio),
+        max_var_ratio_shaped_vs_base=float(args.max_var_ratio_shaped_vs_base),
+        min_abs_dphi_q95=float(args.min_abs_dphi_q95),
+        complexity_penalty_alpha=float(args.complexity_penalty_alpha),
+        refine_top_k=int(args.refine_top_k),
+        refine_epochs=int(args.refine_epochs),
     )
     results = evolution_search(cfg)
 
