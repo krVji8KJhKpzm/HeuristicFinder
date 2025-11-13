@@ -87,6 +87,7 @@ SAVE_PATH=${SAVE_PATH:-phi_best.py}
 TOPK=${TOPK:-5}
 SEED=${SEED:-1234}
 GPU_IDS=${GPU_IDS:-0,1,2,3,4,5}        # e.g., "0,1,2,3" for parallel short-training; leave empty for CPU
+USE_CHEAP_LEVEL=${USE_CHEAP_LEVEL:-1}
 
 # Build command (no Ollama flags; we use remote API via env)
 cmd=(python examples/auto_find_phi_tsp20.py
@@ -122,6 +123,10 @@ cmd=(python examples/auto_find_phi_tsp20.py
   --refine-top-k="${REFINE_TOP_K:-5}"
   --refine-epochs="${REFINE_EPOCHS:-10}"
 )
+
+if [[ "${USE_CHEAP_LEVEL}" == "0" ]]; then
+  cmd+=(--no-cheap-level)
+fi
 
 if [[ "${CENTER_DPHI}" == "1" ]]; then cmd+=(--center-dphi); fi
 if [[ "${NORM_DPHI}" == "1" ]]; then cmd+=(--norm-dphi); fi

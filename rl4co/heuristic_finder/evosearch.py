@@ -93,6 +93,8 @@ class EvoConfig:
     archive_top_k: int = 8
     elite_parent_k: int = 2
     elite_replace_worst: int = 1
+    # Toggle Level-1 cheap evaluation stage
+    use_cheap_level: bool = True
     # Level 1 / Level 2 multi-stage evaluation
     offline_traj_path: str = "data/tsp20_offline_trajs.pt"
     cheap_level_weight: float = 0.1
@@ -906,6 +908,61 @@ def _worker_eval(args: Tuple[Tuple[str, float], dict, Optional[int]]):
 def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
     if not specs:
         return []
+
+    # Fast path: disable cheap Level-1 entirely -> evaluate everyone with Level-2 RL
+    if not bool(getattr(cfg, "use_cheap_level", True)):
+        results: List[Tuple[Candidate, float]] = []
+        gpu_ids = cfg.gpu_ids or []
+        if not gpu_ids:
+            for c in specs:
+                score = train_fitness_phi_on_tsp20(
+                    c.spec,
+                    epochs=cfg.epochs_per_eval,
+                    batch_size=cfg.batch_size,
+                    train_data_size=cfg.train_size,
+                    val_data_size=cfg.val_size,
+                    num_starts=cfg.num_starts,
+                    device=cfg.device,
+                    accelerator="cpu",
+                    devices=1,
+                    seed=cfg.seed,
+                    pbrs_gamma=c.gamma,
+                    reward_scale=cfg.reward_scale,
+                    center_dphi=cfg.center_dphi,
+                    norm_dphi=cfg.norm_dphi,
+                )
+                tour_len = -float(score)
+                if tour_len > float(cfg.objective_bad_threshold):
+                    score = float("-inf")
+                results.append((c, float(score)))
+            return results
+        # parallel GPU path
+        cfgd = {
+            "epochs_per_eval": cfg.epochs_per_eval,
+            "batch_size": cfg.batch_size,
+            "train_size": cfg.train_size,
+            "val_size": cfg.val_size,
+            "num_starts": cfg.num_starts,
+            "device": cfg.device,
+            "seed": cfg.seed,
+            "reward_scale": cfg.reward_scale,
+            "center_dphi": cfg.center_dphi,
+            "norm_dphi": cfg.norm_dphi,
+            "objective_bad_threshold": cfg.objective_bad_threshold,
+        }
+        key2cand = {(c.spec.code, c.gamma): c for c in specs}
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=len(gpu_ids), mp_context=ctx) as ex:
+            futs = []
+            for i, c in enumerate(specs):
+                gpu_id = gpu_ids[i % len(gpu_ids)]
+                futs.append(ex.submit(_worker_eval, ((c.spec.code, c.gamma), cfgd, gpu_id)))
+            for f in as_completed(futs):
+                key, score = f.result()
+                cand = key2cand.get(key)
+                if cand is not None:
+                    results.append((cand, float(score)))
+        return results
 
     # ---------- Level 1: Cheap offline evaluation for all candidates ----------
     offline_trajs = None

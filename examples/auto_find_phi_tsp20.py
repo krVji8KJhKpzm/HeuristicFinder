@@ -102,6 +102,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--complexity-penalty-alpha", type=float, default=0.001)
     p.add_argument("--cheap-eval-device", type=str, default="cpu")
     p.add_argument("--cheap-eval-batch-states", type=int, default=4096)
+    p.add_argument("--no-cheap-level", action="store_true", help="Disable Level-1 cheap evaluation; evaluate all candidates with RL")
     p.add_argument("--refine-top-k", type=int, default=0)
     p.add_argument("--refine-epochs", type=int, default=0)
 
@@ -179,6 +180,7 @@ def main():
         cheap_eval_batch_states=int(args.cheap_eval_batch_states),
         refine_top_k=int(args.refine_top_k),
         refine_epochs=int(args.refine_epochs),
+        use_cheap_level=not bool(args.no_cheap_level),
     )
     results = evolution_search(cfg)
 
