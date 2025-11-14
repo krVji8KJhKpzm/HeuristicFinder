@@ -1,9 +1,13 @@
 """
-EoH-style Phi(s) search example on TSP-20 using short POMOPBRS training as fitness.
+EoH-style Phi(s) search example on TSP-20 using offline MSE as fitness.
 If Ollama is available, use it to generate candidates; otherwise falls back to the DeepSeek or Kimi API.
+
+Fitness is 1 / MSE between Phi(s) and the Monte Carlo value V(s) estimated
+from a fixed baseline policy on randomly generated TSP instances.
 """
 
 from rl4co.heuristic_finder.evosearch import EvoConfig, evolution_search
+import math
 
 
 def main():
@@ -31,7 +35,16 @@ def main():
     results = evolution_search(cfg)
     print("=== Top Candidates ===")
     for cand, score in results:
-        print(f"{cand.spec.name} [gamma={cand.gamma:+.3f}]: val/reward={score:.4f}")
+        mse = None
+        if isinstance(cand.stats, dict):
+            mse = cand.stats.get("mse", None)
+        if mse is None and score > 0:
+            mse = 1.0 / float(score)
+        if mse is not None and mse > 0 and math.isfinite(mse):
+            extra = f"mse={mse:.6f}"
+        else:
+            extra = "mse=n/a"
+        print(f"{cand.spec.name} [gamma={cand.gamma:+.3f}]: fitness={score:.4f}, {extra}")
 
 
 if __name__ == "__main__":

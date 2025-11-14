@@ -24,8 +24,8 @@ export KIMI_MAX_TOKENS="${KIMI_MAX_TOKENS:-8192}"
 export KIMI_TEMPERATURE="${KIMI_TEMPERATURE:-0.6}"
 export KIMI_STREAM="${KIMI_STREAM:-false}"
 
-# ===== TSP nodes (short-training fitness) =====
-# Controls the TSP size used during short-training fitness (train_fitness_phi_on_tsp20).
+# ===== TSP nodes (offline value dataset) =====
+# Controls the TSP size used when generating offline trajectories for V(s).
 # Default to 20 to match TSP-20; change to 50, 100, etc. as needed.
 export TSP_NUM_LOC="${TSP_NUM_LOC:-20}"
 export LLM_DEBUG=0

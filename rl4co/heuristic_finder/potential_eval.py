@@ -340,3 +340,111 @@ def cheap_score_phi(
     score -= float(config.get("complexity_penalty_alpha", 0.001)) * complexity
 
     return float(score), stats, float(complexity)
+
+
+def mse_phi_vs_value(
+    phi_fn: Callable[[InvariantTSPStateView], torch.Tensor],
+    trajectories: Dict[str, Any],
+    device: str | torch.device = "cpu",
+    batch_states: Optional[int] = None,
+    target: str = "future_cost",
+) -> float:
+    """Compute mean-squared error between Phi(s) and Monte Carlo value V(s).
+
+    V(s_t) is taken as the future tour length from state s_t, i.e. the
+    return-to-go of edge lengths along the rollout induced by the baseline
+    policy used in `offline_data_tsp20.collect_tsp20_trajectories`.
+    """
+    episodes: List[Dict[str, Any]] = trajectories["episodes"]
+    device = torch.device(device)
+    bs = int(batch_states) if batch_states else 4096
+
+    # Accumulators for batched evaluation
+    b_locs: List[torch.Tensor] = []
+    b_i: List[int] = []
+    b_curr: List[int] = []
+    b_first: List[int] = []
+    b_mask: List[torch.Tensor] = []
+    b_targets: List[float] = []
+
+    mse_sum = 0.0
+    n_total = 0
+
+    def _flush() -> None:
+        nonlocal mse_sum, n_total
+        if not b_locs:
+            return
+        with torch.no_grad():
+            locs_b = torch.stack(b_locs, dim=0).to(device)
+            i_b = torch.tensor(b_i, dtype=torch.int64, device=device)
+            curr_b = torch.tensor(b_curr, dtype=torch.int64, device=device)
+            first_b = torch.tensor(b_first, dtype=torch.int64, device=device)
+            mask_b = torch.stack(b_mask, dim=0).to(torch.bool).to(device)
+            tgt_b = torch.tensor(b_targets, dtype=torch.float32, device=device)
+
+            sv = _build_batched_state_view(locs_b, i_b, curr_b, first_b, mask_b, device)
+            inv = InvariantTSPStateView(sv)
+            phi = phi_fn(inv)
+            if not isinstance(phi, torch.Tensor):
+                phi = torch.as_tensor(phi, dtype=torch.float32, device=device)
+            phi = torch.nan_to_num(phi, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32)
+            if phi.dim() > 1:
+                phi = phi.squeeze(-1)
+            phi_flat = phi.view(-1)
+
+            # Align lengths defensively
+            L = min(phi_flat.numel(), tgt_b.numel())
+            if L == 0:
+                return
+            err = phi_flat[:L] - tgt_b[:L]
+            mse_sum += float((err * err).sum().item())
+            n_total += int(L)
+
+        b_locs.clear()
+        b_i.clear()
+        b_curr.clear()
+        b_first.clear()
+        b_mask.clear()
+        b_targets.clear()
+
+    for ep in episodes:
+        locs = ep["locs"].to(torch.float32)
+        current_nodes = ep["current_nodes"].to(torch.long)
+        masks = ep["action_masks"].to(torch.bool)
+        r_base = ep["base_step_reward"].to(torch.float32)
+        T = current_nodes.shape[0]
+
+        # Future tour length (sum of edge lengths from t onward)
+        cost_steps = (-r_base).flatten()
+        future_cost = torch.flip(torch.cumsum(torch.flip(cost_steps, dims=[0]), dim=0), dims=[0])
+
+        # Optional alternative targets (kept for completeness)
+        returns = ep.get("returns", None)
+        if returns is not None:
+            returns = returns.to(torch.float32)
+
+        for t in range(T):
+            b_locs.append(locs)
+            b_i.append(t)
+            b_curr.append(int(current_nodes[t].item()))
+            b_first.append(int(ep["first_node"]))
+            b_mask.append(masks[t])
+            if target == "future_cost":
+                tgt_val = float(future_cost[t].item())
+            elif target == "return":
+                if returns is None:
+                    raise ValueError("returns not present in trajectories for target='return'")
+                tgt_val = float(returns[t].item())
+            else:
+                raise ValueError(f"Unknown target type '{target}'")
+            b_targets.append(tgt_val)
+
+            if len(b_locs) >= bs:
+                _flush()
+
+    _flush()
+
+    if n_total == 0:
+        # No valid states; treat as infinitely bad
+        return float("inf")
+    return float(mse_sum / float(n_total))

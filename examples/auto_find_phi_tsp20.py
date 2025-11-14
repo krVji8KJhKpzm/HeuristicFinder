@@ -1,24 +1,10 @@
 """
-EoH-style multi-population search for Phi(state) on TSP-20 with optional full training.
+EoH-style multi-population search for a symbolic Phi(state) on TSP-20.
 
-Steps:
-1) Multi-population evolutionary search (short POMOPBRS training as fitness)
-2) Save best candidate to phi_best.py and dump all candidates with Thought/score/hash
-3) (Optional) Launch full training via Hydra run.py
-
-Examples:
-  # Local Ollama (recommended for EoH replication)
-  python examples/auto_find_phi_tsp20.py \
-    --ollama-model qwen3:32b \
-    --n-pops 4 --pop-size 8 --generations 10 \
-    --operators e1,e2,m1,m2 --operator-weights 1,1,1,1 \
-    --memetic-repair-prob 0.25 --elite-parent-k 2 --archive-top-k 32 \
-    --epochs-per-eval 1 --batch-size 64 --train-size 1000 --val-size 256 \
-    --dump-dir runs/eoh --train-after --train-epochs 100 --gpus 1
-
-  # Remote API (set DEEPSEEK_API_KEY or KIMI_API_KEY + LLM_API_PROVIDER=kimi)
-  DEEPSEEK_API_KEY=sk-... python examples/auto_find_phi_tsp20.py \
-    --n-pops 2 --pop-size 6 --generations 6 --dump-dir runs/eoh
+Fitness is defined as the inverse mean-squared error between Phi(s) and an
+offline Monte Carlo estimate V(s) (future tour length) computed from a fixed
+baseline policy on randomly generated TSP instances. No RL training is run
+inside the loop; the task is pure symbolic regression on the offline dataset.
 """
 
 from __future__ import annotations
@@ -30,6 +16,7 @@ from typing import List
 
 from rl4co.heuristic_finder.evosearch import EvoConfig, evolution_search
 from dotenv import load_dotenv
+import math
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
@@ -198,13 +185,32 @@ def main():
     save_path = os.path.abspath(args.save_path)
     with open(save_path, "w", encoding="utf-8") as f:
         f.write(best_cand.spec.code)
-    # In our fitness, higher reward is better and equals negative tour length
-    est_tour_len = -float(best_score)
+
+    # Fitness is 1 / MSE; report both fitness and estimated MSE
+    best_mse = None
+    if isinstance(best_cand.stats, dict):
+        best_mse = best_cand.stats.get("mse", None)
+    if best_mse is None and best_score > 0:
+        best_mse = 1.0 / float(best_score)
+
     print(f"Saved best phi to: {save_path}")
-    print(f"Estimated tour length (from val/reward): {est_tour_len:.4f}")
+    if best_mse is not None and best_mse > 0 and math.isfinite(best_mse):
+        print(f"Best fitness (1/MSE): {best_score:.6f}, estimated MSE: {best_mse:.6f}")
+    else:
+        print(f"Best fitness (1/MSE): {best_score:.6f}, estimated MSE unavailable")
+
     print("=== Top Candidates ===")
     for cand, score in results[: args.topk]:
-        print(f"{cand.spec.name} [gamma={cand.gamma:+.3f}]: val/reward={score:.4f}")
+        mse = None
+        if isinstance(cand.stats, dict):
+            mse = cand.stats.get("mse", None)
+        if mse is None and score > 0:
+            mse = 1.0 / float(score)
+        if mse is not None and mse > 0 and math.isfinite(mse):
+            extra = f"mse={mse:.6f}"
+        else:
+            extra = "mse=n/a"
+        print(f"{cand.spec.name} [gamma={cand.gamma:+.3f}]: fitness={score:.6f}, {extra}")
     # 3) Optional: Start full training via run.py (Hydra)
     if args.train_after:
         cmd: List[str] = ["python", "run.py", "experiment=routing/pomopbrs-tsp20.yaml"]

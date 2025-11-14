@@ -9,10 +9,9 @@ import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Set
+from typing import List, Optional, Tuple, Dict, Set, Any
 
-from rl4co.heuristic_finder.evaluate import train_fitness_phi_on_tsp20
-from rl4co.heuristic_finder.potential_eval import cheap_score_phi, compute_phi_stats
+from rl4co.heuristic_finder.potential_eval import cheap_score_phi, compute_phi_stats, mse_phi_vs_value
 from rl4co.heuristic_finder.offline_data_tsp20 import load_offline_trajectories
 from rl4co.heuristic_finder.llm import (
     eoh_llm_i1,
@@ -26,6 +25,10 @@ from rl4co.heuristic_finder.llm import (
 from rl4co.heuristic_finder.potential import PotentialSpec, compile_potential
 from rl4co.heuristic_finder.llm import _ensure_thought_line
 # diagnostics removed in EoH-faithful loop (no reflection)
+
+
+# Simple cache for offline trajectory datasets keyed by path
+_OFFLINE_TRAJ_CACHE: Dict[str, Any] = {}
 
 
 @dataclass
@@ -625,18 +628,10 @@ def _compute_phi_stats(spec: PotentialSpec, gamma: float, batch_size: int = 64, 
 
 
 def _ensure_stats_for(results: List[Tuple[Candidate, float]], cfg: EvoConfig) -> None:
-    if not cfg.collect_stats:
-        return
-    for cand, _ in results:
-        if cand.stats is not None:
-            continue
-        try:
-            stats = _compute_phi_stats(cand.spec, cand.gamma, batch_size=cfg.stats_batch_size, device=cfg.device)
-            cand.stats = stats
-            cand.stats_text = _summarize_stats(stats)
-        except Exception:
-            cand.stats = None
-            cand.stats_text = None
+    # In the symbolic regression setting, stats are populated directly during
+    # MSE-based fitness evaluation in `_evaluate_population`, so this helper
+    # becomes a no-op. It is kept for API compatibility.
+    return
 
 
 def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
@@ -714,45 +709,10 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
                 init_cands.append(
                     Candidate(spec=s, gamma=_init_gamma(cfg), algorithm=th, thought=th, code_hash=h)
                 )
-        # Evaluate and keep top-N
+        # Evaluate and keep top-N (fitness is 1 / MSE)
         scored_init = _evaluate_population(init_cands, cfg)
         scored_init.sort(key=lambda x: x[1], reverse=True)
         scored_init = scored_init[:pop_size]
-        # Optional refinement for top-k
-        if cfg.refine_top_k and cfg.refine_epochs and cfg.refine_top_k > 0 and cfg.refine_epochs > 0:
-            topk = min(int(cfg.refine_top_k), len(scored_init))
-            refined: List[Tuple[Candidate, float]] = []
-            for i in range(topk):
-                cand = scored_init[i][0]
-                try:
-                    sc_ref = train_fitness_phi_on_tsp20(
-                        cand.spec,
-                        epochs=int(cfg.refine_epochs),
-                        batch_size=cfg.batch_size,
-                        train_data_size=cfg.train_size,
-                        val_data_size=cfg.val_size,
-                        num_starts=cfg.num_starts,
-                        device=cfg.device,
-                        accelerator="cpu",
-                        devices=1,
-                        seed=cfg.seed,
-                        pbrs_gamma=cand.gamma,
-                        reward_scale=cfg.reward_scale,
-                        center_dphi=cfg.center_dphi,
-                        norm_dphi=cfg.norm_dphi,
-                    )
-                    # Combine with cheap score if available
-                    total = sc_ref
-                    if cand.stats is not None:
-                        # just keep consistency by reusing cheap weight as 0.0 contribution here
-                        pass
-                    refined.append((cand, float(total)))
-                except Exception:
-                    refined.append(scored_init[i])
-            # replace top segment
-            for i in range(len(refined)):
-                scored_init[i] = refined[i]
-        _ensure_stats_for(scored_init, cfg)
         populations.append(scored_init)
         archive.update(scored_init)
         if cfg.dump_dir:
@@ -818,36 +778,6 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
                 scored.extend(off_results)
                 scored.sort(key=lambda x: x[1], reverse=True)
                 scored = scored[:pop_size]
-                _ensure_stats_for(scored, cfg)
-                # Optional refinement for top-k after merge
-                if cfg.refine_top_k and cfg.refine_epochs and cfg.refine_top_k > 0 and cfg.refine_epochs > 0:
-                    topk = min(int(cfg.refine_top_k), len(scored))
-                    refined: List[Tuple[Candidate, float]] = []
-                    for i in range(topk):
-                        cand = scored[i][0]
-                        try:
-                            sc_ref = train_fitness_phi_on_tsp20(
-                                cand.spec,
-                                epochs=int(cfg.refine_epochs),
-                                batch_size=cfg.batch_size,
-                                train_data_size=cfg.train_size,
-                                val_data_size=cfg.val_size,
-                                num_starts=cfg.num_starts,
-                                device=cfg.device,
-                                accelerator="cpu",
-                                devices=1,
-                                seed=cfg.seed,
-                                pbrs_gamma=cand.gamma,
-                                reward_scale=cfg.reward_scale,
-                                center_dphi=cfg.center_dphi,
-                                norm_dphi=cfg.norm_dphi,
-                            )
-                            total = sc_ref
-                            refined.append((cand, float(total)))
-                        except Exception:
-                            refined.append(scored[i])
-                    for i in range(len(refined)):
-                        scored[i] = refined[i]
                 # Optional elite replacement of worst
                 if cfg.elite_replace_worst > 0 and len(archive.entries) > 0:
                     k = min(cfg.elite_replace_worst, len(scored), len(archive.entries))
@@ -868,286 +798,73 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
     return all_scored
 
 
-def _worker_eval(args: Tuple[Tuple[str, float], dict, Optional[int]]):
-    """Subprocess worker: evaluate one candidate on an assigned GPU (or CPU).
-    Returns ((code,gamma), score).
-    """
-    (code, gamma), cfgd, gpu_id = args
-    accelerator = "cpu"
-    devices = 1
-    device_str = cfgd.get("device", "cpu")
-    if gpu_id is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-        accelerator = "gpu"
-        devices = 1
-        device_str = "cuda"
-
-    try:
-        fn = compile_potential(code)
-        spec = PotentialSpec(name="worker", code=code, fn=fn)
-        sc = train_fitness_phi_on_tsp20(
-            spec,
-            epochs=cfgd["epochs_per_eval"],
-            batch_size=cfgd["batch_size"],
-            train_data_size=cfgd["train_size"],
-            val_data_size=cfgd["val_size"],
-            num_starts=cfgd["num_starts"],
-            device=device_str,
-            accelerator=accelerator,
-            devices=devices,
-            seed=cfgd.get("seed", None),
-            pbrs_gamma=gamma,
-            reward_scale=cfgd.get("reward_scale", None),
-            center_dphi=bool(cfgd.get("center_dphi", False)),
-            norm_dphi=bool(cfgd.get("norm_dphi", False)),
-        )
-        tour_len = -float(sc)
-        bad_thr = float(cfgd.get("objective_bad_threshold", 4.0))
-        if tour_len > bad_thr:
-            sc = float("-inf")
-        return (code, gamma), sc
-    except Exception:
-        return (code, gamma), float("-inf")
-
-
 def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
+    """Evaluate a population of candidates using offline MSE as fitness.
+
+    Fitness is defined as 1 / MSE(Phi(s), V(s)), where V(s) is the Monte Carlo
+    return-to-go of future tour length computed from pre-generated trajectories.
+    """
     if not specs:
         return []
 
-    use_cheap = bool(getattr(cfg, "use_cheap_level", True))
-    use_level2 = bool(getattr(cfg, "use_level2_rl", True))
-
-    # Fast path: disable cheap Level-1 entirely -> evaluate everyone with Level-2 RL
-    if not use_cheap:
-        if not use_level2:
-            # Both cheap Level-1 and Level-2 RL are disabled: fall back to
-            # neutral scores so evolution can still proceed without crashing.
-            return [(c, 0.0) for c in specs]
-        results: List[Tuple[Candidate, float]] = []
-        gpu_ids = cfg.gpu_ids or []
-        if not gpu_ids:
-            for c in specs:
-                score = train_fitness_phi_on_tsp20(
-                    c.spec,
-                    epochs=cfg.epochs_per_eval,
-                    batch_size=cfg.batch_size,
-                    train_data_size=cfg.train_size,
-                    val_data_size=cfg.val_size,
-                    num_starts=cfg.num_starts,
-                    device=cfg.device,
-                    accelerator="cpu",
-                    devices=1,
-                    seed=cfg.seed,
-                    pbrs_gamma=c.gamma,
-                    reward_scale=cfg.reward_scale,
-                    center_dphi=cfg.center_dphi,
-                    norm_dphi=cfg.norm_dphi,
-                )
-                tour_len = -float(score)
-                if tour_len > float(cfg.objective_bad_threshold):
-                    score = float("-inf")
-                results.append((c, float(score)))
-            return results
-        # parallel GPU path
-        cfgd = {
-            "epochs_per_eval": cfg.epochs_per_eval,
-            "batch_size": cfg.batch_size,
-            "train_size": cfg.train_size,
-            "val_size": cfg.val_size,
-            "num_starts": cfg.num_starts,
-            "device": cfg.device,
-            "seed": cfg.seed,
-            "reward_scale": cfg.reward_scale,
-            "center_dphi": cfg.center_dphi,
-            "norm_dphi": cfg.norm_dphi,
-            "objective_bad_threshold": cfg.objective_bad_threshold,
-        }
-        key2cand = {(c.spec.code, c.gamma): c for c in specs}
-        ctx = mp.get_context("spawn")
-        with ProcessPoolExecutor(max_workers=len(gpu_ids), mp_context=ctx) as ex:
-            futs = []
-            for i, c in enumerate(specs):
-                gpu_id = gpu_ids[i % len(gpu_ids)]
-                futs.append(ex.submit(_worker_eval, ((c.spec.code, c.gamma), cfgd, gpu_id)))
-            for f in as_completed(futs):
-                key, score = f.result()
-                cand = key2cand.get(key)
-                if cand is not None:
-                    results.append((cand, float(score)))
-        return results
-
-    # ---------- Level 1: Cheap offline credit-assignment evaluation for all candidates ----------
+    # Load (and cache) offline trajectories containing states and Monte Carlo values
     offline_trajs = None
-    if cfg.offline_traj_path and os.path.exists(cfg.offline_traj_path):
-        try:
-            offline_trajs = load_offline_trajectories(cfg.offline_traj_path)
-        except Exception:
-            offline_trajs = None
-
-    meta: Dict[Tuple[str, float], Dict[str, object]] = {}
-    cheap_rank_list: List[Tuple[Candidate, float]] = []
-    for c in specs:
-        cheap_score = 0.0
-        stats_dict: Optional[Dict[str, float]] = None
-        complexity = 0.0
-        if offline_trajs is not None:
+    path = getattr(cfg, "offline_traj_path", None)
+    if path:
+        if path in _OFFLINE_TRAJ_CACHE:
+            offline_trajs = _OFFLINE_TRAJ_CACHE[path]
+        elif os.path.exists(path):
             try:
-                s, stats, comp = cheap_score_phi(
-                    c.spec.fn,
-                    offline_trajs,
-                    c.gamma,
-                    config={
-                        "max_step_shaping_ratio": cfg.max_step_shaping_ratio,
-                        "max_episode_shaping_ratio": cfg.max_episode_shaping_ratio,
-                        "max_var_ratio_shaped_vs_base": cfg.max_var_ratio_shaped_vs_base,
-                        "min_abs_dphi_q95": cfg.min_abs_dphi_q95,
-                        "complexity_penalty_alpha": cfg.complexity_penalty_alpha,
-                        "cheap_eval_device": cfg.cheap_eval_device,
-                        "cheap_eval_batch_states": cfg.cheap_eval_batch_states,
-                    },
-                    code=c.spec.code,
-                )
-                cheap_score = float(s)
-                stats_dict = {
-                    "mean_dphi": stats.mean_dphi,
-                    "std_dphi": stats.std_dphi,
-                    "abs_dphi_q95": stats.abs_dphi_q95,
-                    "step_shaping_ratio": stats.step_shaping_ratio,
-                    "episode_shaping_ratio": stats.episode_shaping_ratio,
-                    "var_ratio_shaped_vs_base": stats.var_ratio_shaped_vs_base,
-                    "corr_dphi_future_cost": stats.corr_dphi_future_cost,
-                    "corr_phi0_final_reward": stats.corr_phi0_final_reward,
-                    "corr_sum_dphi_final_reward": stats.corr_sum_dphi_final_reward,
-                }
-                complexity = float(comp)
+                offline_trajs = load_offline_trajectories(path)
+                _OFFLINE_TRAJ_CACHE[path] = offline_trajs
             except Exception:
-                cheap_score = float("-1e6")
-                stats_dict = None
-                complexity = 0.0
-        else:
-            # No offline data: neutral cheap score
-            cheap_score = 0.0
-            stats_dict = None
-            complexity = 0.0
+                offline_trajs = None
 
-        c.stats = stats_dict
-        c.stats_text = _summarize_stats(stats_dict) if stats_dict else None
-        meta[(c.spec.code, c.gamma)] = {
-            "cheap_score": cheap_score,
-            "complexity": complexity,
-            "stats": stats_dict,
-        }
-        cheap_rank_list.append((c, cheap_score))
+    if offline_trajs is None:
+        # If no dataset is available, fall back to neutral scores so the loop
+        # can still progress (though results will be meaningless).
+        return [(c, 0.0) for c in specs]
 
-    # If Level-2 RL is disabled, use purely credit-assignment-based cheap scores
-    # (plus the same soft variance penalty) to rank candidates.
-    if not use_level2:
-        results: List[Tuple[Candidate, float]] = []
-        for c in specs:
-            m = meta.get((c.spec.code, c.gamma), {})
-            cheap = float(m.get("cheap_score", 0.0))
-            st = m.get("stats") or {}
-            total = cheap
-            try:
-                vr = st.get("var_ratio_shaped_vs_base", None)
-                if vr is not None and math.isfinite(vr):
-                    total -= 0.05 * max(0.0, float(vr) - 1.0)
-            except Exception:
-                pass
-            results.append((c, float(total)))
-        return results
-
-    # Filter by cheap_score threshold, then keep top-K for Level 2 RL eval
-    if offline_trajs is not None:
-        cheap_rank_list = [(c, s) for (c, s) in cheap_rank_list if s >= float(cfg.cheap_filter_threshold)]
-        cheap_rank_list.sort(key=lambda x: x[1], reverse=True)
-        allow_n = max(1, int(math.ceil((cfg.pop_size if cfg.pop_size is not None else cfg.population_size) * float(cfg.cheap_topk_ratio))))
-        allow_n = min(allow_n, int(cfg.max_candidates_rl_eval))
-        level2_set: List[Candidate] = [c for c, _ in cheap_rank_list[:allow_n]]
-    else:
-        # No offline trajectories: evaluate all in Level 2 to preserve original behavior
-        level2_set = list(specs)
-
-    # ---------- Level 2: Short RL eval for top-K; others get default poor RL score ----------
     results: List[Tuple[Candidate, float]] = []
-    rl_scores: Dict[Tuple[str, float], float] = {}
-
-    def _finalize_score(cand: Candidate, rl_score: float) -> float:
-        m = meta.get((cand.spec.code, cand.gamma), {})
-        cheap = float(m.get("cheap_score", 0.0))
-        # combine
-        total = float(rl_score) + float(cfg.cheap_level_weight) * cheap
-        # optional soft penalties based on stats
-        st = m.get("stats") or {}
-        try:
-            vr = st.get("var_ratio_shaped_vs_base", None)
-            if vr is not None and math.isfinite(vr):
-                total -= 0.05 * max(0.0, float(vr) - 1.0)
-        except Exception:
-            pass
-        return float(total)
-
-    # If no GPUs provided, run sequentially
-    gpu_ids = cfg.gpu_ids or []
-    if not gpu_ids:
-        for c in specs:
-            if c in level2_set:
-                score = train_fitness_phi_on_tsp20(
-                    c.spec,
-                    epochs=cfg.epochs_per_eval,
-                    batch_size=cfg.batch_size,
-                    train_data_size=cfg.train_size,
-                    val_data_size=cfg.val_size,
-                    num_starts=cfg.num_starts,
-                    device=cfg.device,
-                    accelerator="cpu",
-                    devices=1,
-                    seed=cfg.seed,
-                    pbrs_gamma=c.gamma,
-                    reward_scale=cfg.reward_scale,
-                    center_dphi=cfg.center_dphi,
-                    norm_dphi=cfg.norm_dphi,
-                )
-                tour_len = -float(score)
-                if tour_len > float(cfg.objective_bad_threshold):
-                    score = float("-inf")
-            else:
-                score = float(-1e6)  # default poor RL score for filtered-out candidates
-            total = _finalize_score(c, score)
-            results.append((c, total))
-        return results
-
-    # parallel across provided GPU ids for level2_set only
-    cfgd = {
-        "epochs_per_eval": cfg.epochs_per_eval,
-        "batch_size": cfg.batch_size,
-        "train_size": cfg.train_size,
-        "val_size": cfg.val_size,
-        "num_starts": cfg.num_starts,
-        "device": cfg.device,
-        "seed": cfg.seed,
-        "reward_scale": cfg.reward_scale,
-        "center_dphi": cfg.center_dphi,
-        "norm_dphi": cfg.norm_dphi,
-        "objective_bad_threshold": cfg.objective_bad_threshold,
-    }
-    key2cand = {(c.spec.code, c.gamma): c for c in level2_set}
-    ctx = mp.get_context("spawn")
-    with ProcessPoolExecutor(max_workers=len(gpu_ids), mp_context=ctx) as ex:
-        futs = []
-        for i, c in enumerate(level2_set):
-            gpu_id = gpu_ids[i % len(gpu_ids)]
-            futs.append(ex.submit(_worker_eval, ((c.spec.code, c.gamma), cfgd, gpu_id)))
-        for f in as_completed(futs):
-            key, score = f.result()
-            rl_scores[key] = score
-
-    # Combine all candidates with their RL or default score
     for c in specs:
-        key = (c.spec.code, c.gamma)
-        rl_sc = rl_scores.get(key, float(-1e6))
-        total = _finalize_score(c, rl_sc)
-        results.append((c, total))
+        try:
+            mse = mse_phi_vs_value(
+                c.spec.fn,
+                offline_trajs,
+                device=getattr(cfg, "cheap_eval_device", "cpu"),
+                batch_states=getattr(cfg, "cheap_eval_batch_states", None),
+                target="future_cost",
+            )
+        except Exception:
+            mse = float("inf")
+
+        if not math.isfinite(mse) or mse <= 0.0:
+            fitness = 0.0
+        else:
+            # MSE 的倒数作为适应度
+            fitness = 1.0 / float(mse)
+
+        # Attach simple stats for logging / dumps
+        stats_dict: Dict[str, float] = {}
+        if math.isfinite(mse) and mse >= 0.0:
+            stats_dict["mse"] = float(mse)
+            try:
+                stats_dict["rmse"] = float(math.sqrt(mse))
+            except Exception:
+                stats_dict["rmse"] = float("nan")
+        c.stats = stats_dict if stats_dict else None
+        if stats_dict:
+            parts = []
+            if "mse" in stats_dict:
+                parts.append(f"mse={stats_dict['mse']:.6g}")
+            if "rmse" in stats_dict and math.isfinite(stats_dict["rmse"]):
+                parts.append(f"rmse={stats_dict['rmse']:.6g}")
+            c.stats_text = "; ".join(parts)
+        else:
+            c.stats_text = None
+
+        results.append((c, float(fitness)))
+
     return results
 
 
