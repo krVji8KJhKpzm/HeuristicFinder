@@ -16,10 +16,10 @@ export DEEPSEEK_MAX_TOKENS="${DEEPSEEK_MAX_TOKENS:-32768}"
 export DEEPSEEK_TEMPERATURE="${DEEPSEEK_TEMPERATURE:-0.0}"
 export DEEPSEEK_STREAM="${DEEPSEEK_STREAM:-false}"
 # Kimi overrides (used when provider is kimi)
-# export KIMI_API_BASE="${KIMI_API_BASE:-https://api.moonshot.cn/v1}"
+export KIMI_API_BASE="${KIMI_API_BASE:-https://api.moonshot.cn/v1}"
 export KIMI_MODEL="${KIMI_MODEL:-kimi-k2-turbo-preview}"
-export KIMI_API_BASE="${KIMI_API_BASE:-https://api.bltcy.ai/v1}"
-export KIMI_MODEL="${KIMI_MODEL:-gpt-4o-mini}"
+# export KIMI_API_BASE="${KIMI_API_BASE:-https://api.bltcy.ai/v1}"
+# export KIMI_MODEL="${KIMI_MODEL:-gpt-4o-mini}"
 export KIMI_MAX_TOKENS="${KIMI_MAX_TOKENS:-8192}"
 export KIMI_TEMPERATURE="${KIMI_TEMPERATURE:-0.6}"
 export KIMI_STREAM="${KIMI_STREAM:-false}"
@@ -27,7 +27,7 @@ export KIMI_STREAM="${KIMI_STREAM:-false}"
 # ===== TSP nodes (offline value dataset) =====
 # Controls the TSP size used when generating offline trajectories for V(s).
 # Default to 20 to match TSP-20; change to 50, 100, etc. as needed.
-export TSP_NUM_LOC="${TSP_NUM_LOC:-20}"
+export TSP_NUM_LOC="${TSP_NUM_LOC:-100}"
 export LLM_DEBUG=0
 export LLM_DUMP_DIR=""
 
@@ -40,7 +40,7 @@ OP_WEIGHTS=${OP_WEIGHTS:-1,1,1,1,0.3}
 TOURNAMENT_K=${TOURNAMENT_K:-4}
 
 # ===== Offline trajectories for Level-1 cheap eval =====
-OFFLINE_TRAJ_PATH=${OFFLINE_TRAJ_PATH:-data/tsp20_offline_trajs.pt}
+OFFLINE_TRAJ_PATH=${OFFLINE_TRAJ_PATH:-data/tsp100_offline_trajs_100000.pt}
 OFFLINE_NUM_EPISODES=${OFFLINE_NUM_EPISODES:-100000}
 OFFLINE_BATCH_SIZE=${OFFLINE_BATCH_SIZE:-512}
 BASELINE_CKPT=${BASELINE_CKPT:-baseline.ckpt}
@@ -82,7 +82,7 @@ cmd=(python examples/auto_find_phi_tsp20.py
   --save-path "$SAVE_PATH"
   --topk "$TOPK"
   --seed "$SEED"
-  --offline-traj-path "$OFFLINE_TRAJ_PATH"
+  --offline-traj-path "data/tsp100_offline_trajs_100000.pt"
   --cheap-eval-device "${CHEAP_EVAL_DEVICE}"
   --cheap-eval-batch-states "${CHEAP_EVAL_BATCH_STATES}"
 )
