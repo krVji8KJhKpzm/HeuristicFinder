@@ -72,6 +72,7 @@ class RL4COLitModule(LightningModule, metaclass=abc.ABCMeta):
         metrics: dict = {},
         **litmodule_kwargs,
     ):
+        self.ea_kwargs = litmodule_kwargs.pop("ea_kwargs", None)
         super().__init__(**litmodule_kwargs)
 
         # This line ensures params passed to LightningModule will be saved to ckpt
