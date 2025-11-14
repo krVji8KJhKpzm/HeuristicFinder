@@ -24,7 +24,7 @@ def _available_helpers_text() -> str:
 
 def format_prompt(env_name: str = "tsp", guidance: str = "") -> str:
     return (
-        "You are designing a potential function Phi(state) for PBRS in "
+        "You are designing a scalar function Phi(state) that approximates the Monte Carlo value V(state) (future tour length) for "
         f"combinatorial optimization env '{env_name}'.\n"
         "Output format (strict):\n"
         "- Return ONLY a single fenced code block starting with: ```python and ending with: ```\n"
@@ -780,7 +780,7 @@ def two_stage_generate_candidates(*args, **kwargs) -> List[str]:  # legacy shim 
 def _phi_prompt_parts(env_name: str = "tsp") -> Dict[str, object]:
     """Emulate EoH prompt parts for our PBRS phi(state) function."""
     task = (
-        "Design a potential function for potential-based reward shaping (PBRS) in "
+        "Design a scalar function Phi(state) that approximates the Monte Carlo value V(state) (future tour length) for "
         f"the {env_name.upper()} environment. Implement a Python function named 'phi' that"
         " takes a single input 'state' (TSPStateView) and returns a scalar per batch"
         " as a torch tensor broadcastable to [B,1]."
