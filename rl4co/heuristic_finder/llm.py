@@ -35,8 +35,8 @@ def format_prompt(env_name: str = "tsp", guidance: str = "") -> str:
         "Goal: robust, node-count-invariant outputs. Use reductions (mean/max/min/std/softmin) over N-dependent tensors.\n"
         "Avoid Python loops; prefer vectorized torch ops.\n"
         + _available_helpers_text()
-        "Do NOT use any other state.* helpers (e.g., visited_ratio, remaining_ratio, nearest/centroid/start distances, graph_scale, distances_from_current).\n"
-        "Return a tensor broadcastable to [B,1]. Keep it simple and stable.\n"
+        + "Do NOT use any other state.* helpers (e.g., visited_ratio, remaining_ratio, nearest/centroid/start distances, graph_scale, distances_from_current).\n"
+        + "Return a tensor broadcastable to [B,1]. Keep it simple and stable.\n"
         + guidance
     )
 
@@ -192,11 +192,7 @@ def _reasoner_context(env_name: str = "tsp") -> str:
         "Constraints: node-count-invariant, output broadcastable to [B,1], handle NaNs with torch.nan_to_num,\n"
         "and prefer simple/stable formulations. Use ONLY the listed raw helpers; do not invent extra methods.\n"
     )
-    ctx = (
-        goal
-        + "Available state helpers (batch-friendly):\n"
-        + parts["inout_inf"]
-    )
+    ctx = goal + parts["inout_inf"]
     return ctx
 
 
