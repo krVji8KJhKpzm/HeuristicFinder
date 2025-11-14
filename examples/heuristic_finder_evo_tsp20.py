@@ -11,8 +11,8 @@ def main():
         n_pops=2,
         pop_size=4,
         generations=3,
-        operators=["e1", "e2", "m1", "m2"],
-        operator_weights=[1, 1, 1, 1],
+        operators=["e1", "e2", "m1", "m2", "m3"],
+        operator_weights=[1, 1, 1, 1, 1],
         epochs_per_eval=1,
         batch_size=64,
         train_size=1000,
@@ -36,3 +36,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

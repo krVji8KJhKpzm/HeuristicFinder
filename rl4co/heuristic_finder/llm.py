@@ -184,16 +184,7 @@ def _build_repair_instruction(raw: str) -> str:
     )
 
 
-def _reasoner_context(env_name: str = "tsp") -> str:
-    """Build a neutral, spec-only context for the reasoner stage without code-only directives."""
-    parts = _phi_prompt_parts(env_name)
-    goal = (
-        "Design a potential function Phi(state) for PBRS in the given environment.\n"
-        "Constraints: node-count-invariant, output broadcastable to [B,1], handle NaNs with torch.nan_to_num,\n"
-        "and prefer simple/stable formulations. Use ONLY the listed raw helpers; do not invent extra methods.\n"
-    )
-    ctx = goal + parts["inout_inf"]
-    return ctx
+# Two-stage generation helpers removed per simplified pipeline.
 
 
 def generate_candidates_via_ollama(
@@ -777,103 +768,12 @@ def generate_candidates(
     return _generate_candidates_for_provider(provider, prompt, n=n, model=api_model, debug=debug)
 
 
-def _reasoner_spec_prompt(context: str) -> str:
-    return (
-        "You are an expert in PBRS for TSP. Based on the following context, produce ONLY a concise JSON specification"
-        " of a potential function 'phi(state)' without any code or explanations. JSON schema:\n"
-        "{\n"
-        "  \"summary\": string,\n"
-        "  \"terms\": [\n"
-        "    {\"name\": string, \"weight\": number, \"formula\": string}\n"
-        "  ],\n"
-        "  \"constraints\": [string],\n"
-        "  \"edge_cases\": [string],\n"
-        "  \"final_formula\": string\n"
-        "}\n"
-        "Return strictly valid JSON.\n\n"
-        "Context begins:\n" + context + "\nContext ends."
-    )
-
-
-def _coder_prompt_from_spec(env_name: str, spec_text: str) -> str:
-    base = format_prompt(env_name)
-    inst = (
-        "\nImplement 'phi(state)' that follows this specification.\n"
-        "Return ONLY one fenced code block.\n"
-        "Specification (verbatim):\n" + spec_text + "\n"
-    )
-    return base + "\n" + inst
-
-
-def two_stage_generate_candidates(
-    prompt: str,
-    n: int = 1,
-    env_name: str = "tsp",
-    debug: bool = False,
-    reasoner_model: Optional[str] = None,
-    coder_ollama_model: Optional[str] = None,
-    api_provider: Optional[str] = None,
-) -> List[str]:
-    """Two-stage generation: provider reasoner/spec followed by Ollama (Qwen) or provider chat coder.
-
-    - Stage 1 (spec): uses the selected provider (DeepSeek or Kimi) reasoner model.
-    - Stage 2 (code): uses local Ollama (if available) otherwise the provider chat model.
-    """
-    # Stage 1: reasoner spec
-    spec_ctx = _reasoner_context(env_name)
-    spec_msgs_prompt = _reasoner_spec_prompt(spec_ctx)
-    provider = _resolve_llm_api_provider(api_provider)
-    rm = reasoner_model or _default_reasoner_model(provider)
-    json_sys_prompt = (
-        "You are a PBRS/TSP expert. Return ONLY valid JSON (no code, no explanations) that matches the requested schema."
-    )
-    specs = _generate_candidates_for_provider(
-        provider,
-        spec_msgs_prompt,
-        n=n,
-        model=rm,
-        debug=debug,
-        system_prompt=json_sys_prompt,
-        expect_code=False,
-    )
-    if not specs:
-        # fallback: use single-stage provider with a stronger system prompt
-        if debug:
-            print("[HeuristicFinder] Reasoner produced no specs; falling back to single-stage generation.", flush=True)
-        return generate_candidates(prompt, n=n, debug=debug, ollama_model=coder_ollama_model)
-
-    out: List[str] = []
-    for i, spec in enumerate(specs):
-        try:
-            coder_prompt = _coder_prompt_from_spec(env_name, spec)
-            coder_model = coder_ollama_model or os.environ.get("TWO_STAGE_CODER_MODEL", None)
-            if coder_model:
-                codes = generate_candidates_via_ollama(coder_model, coder_prompt, n=1, debug=debug)
-                if not codes or not _looks_like_phi(codes[0]):
-                    fallback_model = _default_coder_model(provider)
-                    codes = _generate_candidates_for_provider(
-                        provider,
-                        coder_prompt,
-                        n=1,
-                        model=fallback_model,
-                        debug=debug,
-                    )
-            else:
-                fallback_model = _default_coder_model(provider)
-                codes = _generate_candidates_for_provider(
-                    provider,
-                    coder_prompt,
-                    n=1,
-                    model=fallback_model,
-                    debug=debug,
-                )
-            if codes:
-                out.append(codes[0])
-        except Exception as e:
-            # if debug:
-            print(f"[HeuristicFinder] two-stage failed at sample {i}: {e}", flush=True)
-            continue
-    return out
+def _reasoner_spec_prompt(context: str) -> str:  # legacy shim (unused)
+    return ""
+def _coder_prompt_from_spec(env_name: str, spec_text: str) -> str:  # legacy shim (unused)
+    return ""
+def two_stage_generate_candidates(*args, **kwargs) -> List[str]:  # legacy shim (unused)
+    return []
 
 
 # --- EoH-style prompts/operators (Ollama-only) ---
@@ -897,6 +797,7 @@ def _phi_prompt_parts(env_name: str = "tsp") -> Dict[str, object]:
         " avoid Python loops; ensure outputs are finite and reasonably scaled."
         " Return ONLY one fenced Python code block: the FIRST line is '# THOUGHT: {one-sentence idea}',"
         " followed by exactly one function 'def phi(state):'. No extra text outside the code block."
+        " Additionally, you must use at least one of the following helpers somewhere in your computation: all_node_coords() or partial_path_indices()."
         "\nQuality constraints (aim to satisfy):\n"
         "- Shaping strength should be moderate: target step_shaping_ratio and episode_shaping_ratio in [0.01, 0.20].\n"
         "- Terminal consistency: for complete trajectories, make gamma^T·Phi(s_T) - Phi(s_0) close to 0; keep Phi equal across terminal goal states.\n"
@@ -1118,24 +1019,18 @@ def eoh_llm_e1(model: Optional[str], parents: List[Dict[str, str]], n: int = 1, 
     prompt = _prompt_e1(parents, env_name)
     # allow env to force debug
     debug = debug or os.environ.get("LLM_DEBUG", "").lower() in ("1", "true", "yes")
-    if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):  # reasoner -> coder(Qwen)
-        return two_stage_generate_candidates(prompt, n=n, env_name=env_name, debug=debug, coder_ollama_model=model)
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
 def eoh_llm_e2(model: Optional[str], parents: List[Dict[str, str]], n: int = 1, env_name: str = "tsp", debug: bool = False, stream: bool = False) -> List[str]:
     prompt = _prompt_e2(parents, env_name)
     debug = debug or os.environ.get("LLM_DEBUG", "").lower() in ("1", "true", "yes")
-    if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):
-        return two_stage_generate_candidates(prompt, n=n, env_name=env_name, debug=debug, coder_ollama_model=model)
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
 def eoh_llm_i1(model: Optional[str], n: int = 1, env_name: str = "tsp", debug: bool = False, stream: bool = False) -> List[str]:
     prompt = _prompt_i1(env_name)
     debug = debug or os.environ.get("LLM_DEBUG", "").lower() in ("1", "true", "yes")
-    if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):
-        return two_stage_generate_candidates(prompt, n=n, env_name=env_name, debug=debug, coder_ollama_model=model)
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
@@ -1143,8 +1038,6 @@ def eoh_llm_m1(model: Optional[str], parent_code: str, n: int = 1, env_name: str
     parent = {"algorithm": "(no description)", "code": parent_code}
     prompt = _prompt_m1(parent, env_name)
     debug = debug or os.environ.get("LLM_DEBUG", "").lower() in ("1", "true", "yes")
-    if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):
-        return two_stage_generate_candidates(prompt, n=n, env_name=env_name, debug=debug, coder_ollama_model=model)
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
@@ -1152,94 +1045,16 @@ def eoh_llm_m2(model: Optional[str], parent_code: str, n: int = 1, env_name: str
     parent = {"algorithm": "(no description)", "code": parent_code}
     prompt = _prompt_m2(parent, env_name)
     debug = debug or os.environ.get("LLM_DEBUG", "").lower() in ("1", "true", "yes")
-    if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):
-        return two_stage_generate_candidates(prompt, n=n, env_name=env_name, debug=debug, coder_ollama_model=model)
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
 
 
 def eoh_llm_m3(model: Optional[str], parent_code: str, n: int = 1, env_name: str = "tsp", debug: bool = False, stream: bool = False) -> List[str]:
     parent = {"code": parent_code}
     prompt = _prompt_m3(parent, env_name)
-    if os.environ.get("TWO_STAGE_CODEGEN", "").lower() in ("1", "true", "yes"):
-        return two_stage_generate_candidates(prompt, n=n, env_name=env_name, debug=debug, coder_ollama_model=model)
     return generate_candidates(prompt, n=n, debug=debug, ollama_model=model)
-def build_eoh_prompt(
-    operator: str,
-    env_name: str,
-    parent_a: str,
-    parent_b: Optional[str] = None,
-    guidance: str = "",
-    eval_summary: str = "",
-) -> str:
-    """Construct an instruction for an LLM to mutate or crossover `phi` code.
-
-    The LLM must output ONLY a valid Python function: `def phi(state): ...`.
-    """
-    header = format_prompt(env_name, guidance)
-    if eval_summary:
-        header += f"\nPerformance summary (for reference):\n{eval_summary}\n"
-
-    if operator.lower() == "mutate":
-        instr = (
-            "Operator: MUTATE.\n"
-            "Make small but meaningful changes to improve stability and validation reward.\n"
-            "Preserve shapes and broadcasting; avoid dependence on exact N.\n"
-            "Parent A (current):\n" + parent_a + "\n"
-            "Return ONLY the new function in a fenced code block (```python ... ```), no extra text."
-        )
-    elif operator.lower() == "crossover" and parent_b is not None:
-        instr = (
-            "Operator: CROSSOVER.\n"
-            "Merge good ideas from two parents into a single, concise function.\n"
-            "Avoid duplicated work and keep constants well-scaled.\n"
-            "Parent A:\n" + parent_a + "\n\nParent B:\n" + parent_b + "\n"
-            "Return ONLY the new function in a fenced code block (```python ... ```), no extra text."
-        )
-    else:
-        instr = (
-            "Rewrite to improve clarity and robustness without changing I/O.\n"
-            + parent_a
-            + "\nReturn ONLY the new function in a fenced code block (```python ... ```), no extra text."
-        )
-
-    return header + "\n" + instr
-
-
-def eoh_llm_mutate(
-    model: str,
-    parent_code: str,
-    env_name: str = "tsp",
-    guidance: str = "",
-    eval_summary: str = "",
-    n: int = 1,
-    debug: bool = False,
-) -> List[str]:
-    prompt = build_eoh_prompt(
-        operator="mutate",
-        env_name=env_name,
-        parent_a=parent_code,
-        guidance=guidance,
-        eval_summary=eval_summary,
-    )
-    return generate_candidates_via_ollama(model, prompt, n=n, debug=debug)
-
-
-def eoh_llm_crossover(
-    model: str,
-    parent_a: str,
-    parent_b: str,
-    env_name: str = "tsp",
-    guidance: str = "",
-    eval_summary: str = "",
-    n: int = 1,
-    debug: bool = False,
-) -> List[str]:
-    prompt = build_eoh_prompt(
-        operator="crossover",
-        env_name=env_name,
-        parent_a=parent_a,
-        parent_b=parent_b,
-        guidance=guidance,
-        eval_summary=eval_summary,
-    )
-    return generate_candidates_via_ollama(model, prompt, n=n, debug=debug)
+def build_eoh_prompt(*args, **kwargs) -> str:  # deprecated
+    return ""
+def eoh_llm_mutate(*args, **kwargs) -> List[str]:  # deprecated
+    return []
+def eoh_llm_crossover(*args, **kwargs) -> List[str]:  # deprecated
+    return []

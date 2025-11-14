@@ -1,4 +1,4 @@
-﻿"""
+"""
 EoH-style multi-population search for Phi(state) on TSP-20 with optional full training.
 
 Steps:
@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--n-pops", type=int, default=1, help="# independent populations (EoH ec_n_pop)")
     p.add_argument("--pop-size", type=int, default=4, help="population size per pop (EoH ec_pop_size)")
     p.add_argument("--generations", type=int, default=2, help="# evolutionary generations")
-    p.add_argument("--operators", type=str, default="e1,e2,m1,m2", help="comma list of operators")
+    p.add_argument("--operators", type=str, default="e1,e2,m1,m2,m3", help="comma list of operators")
     p.add_argument("--operator-weights", type=str, default=None, help="comma list of per-operator probabilities")
     p.add_argument("--tournament-k", type=int, default=3, help="Tournament size")
     p.add_argument("--epochs-per-eval", type=int, default=1)
@@ -219,4 +219,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import glob
 import json
@@ -24,6 +24,7 @@ from rl4co.heuristic_finder.llm import (
     eoh_llm_repair,
 )
 from rl4co.heuristic_finder.potential import PotentialSpec, compile_potential
+from rl4co.heuristic_finder.llm import _ensure_thought_line
 # diagnostics removed in EoH-faithful loop (no reflection)
 
 
@@ -123,6 +124,7 @@ def compile_candidates(codes: List[str]) -> List[PotentialSpec]:
     out: List[PotentialSpec] = []
     for i, code in enumerate(codes):
         try:
+            code = _ensure_thought_line(code)
             fn = compile_potential(code)
         except Exception:
             continue
@@ -643,7 +645,7 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
     - Elite archive maintained across generations with optional parent injection
     """
     # Resolve default operators/weights if not provided
-    ops = cfg.operators if cfg.operators is not None else ["e1", "e2", "m1", "m2"]
+    ops = cfg.operators if cfg.operators is not None else ["e1", "e2", "m1", "m2", "m3"]
     op_weights = cfg.operator_weights if cfg.operator_weights is not None else [1.0 for _ in ops]
     if len(op_weights) != len(ops):
         op_weights = [1.0 for _ in ops]
@@ -1178,3 +1180,4 @@ def _dump_candidates(dump_dir: str, results: List[Tuple[Candidate, float]], gen_
                 pass
         except Exception:
             pass
+
