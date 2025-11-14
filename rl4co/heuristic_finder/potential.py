@@ -110,6 +110,9 @@ def compile_potential(code: str) -> Callable[[TSPStateView], torch.Tensor]:
         "current_node_index",
         "first_node_index",
         "distance_matrix",
+        # newly exposed helpers
+        "all_node_coords",
+        "partial_path_indices",
     }
 
     def _root_name(attr: ast.AST) -> str:
