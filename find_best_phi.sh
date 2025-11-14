@@ -16,8 +16,10 @@ export DEEPSEEK_MAX_TOKENS="${DEEPSEEK_MAX_TOKENS:-32768}"
 export DEEPSEEK_TEMPERATURE="${DEEPSEEK_TEMPERATURE:-0.0}"
 export DEEPSEEK_STREAM="${DEEPSEEK_STREAM:-false}"
 # Kimi overrides (used when provider is kimi)
-export KIMI_API_BASE="${KIMI_API_BASE:-https://api.moonshot.cn/v1}"
+# export KIMI_API_BASE="${KIMI_API_BASE:-https://api.moonshot.cn/v1}"
 export KIMI_MODEL="${KIMI_MODEL:-kimi-k2-turbo-preview}"
+export KIMI_API_BASE="${KIMI_API_BASE:-https://api.bltcy.ai/v1}"
+export KIMI_MODEL="${KIMI_MODEL:-gpt-4o-mini}"
 export KIMI_MAX_TOKENS="${KIMI_MAX_TOKENS:-8192}"
 export KIMI_TEMPERATURE="${KIMI_TEMPERATURE:-0.6}"
 export KIMI_STREAM="${KIMI_STREAM:-false}"
@@ -33,8 +35,8 @@ export LLM_DUMP_DIR=""
 N_POPS=${N_POPS:-1}
 POP_SIZE=${POP_SIZE:-20}
 GENERATIONS=${GENERATIONS:-20}
-OPERATORS=${OPERATORS:-e1,e2,m1,m2}
-OP_WEIGHTS=${OP_WEIGHTS:-1,1,1,1}
+OPERATORS=${OPERATORS:-e1,e2,m1,m2,m3}
+OP_WEIGHTS=${OP_WEIGHTS:-1,1,1,1,0.3}
 TOURNAMENT_K=${TOURNAMENT_K:-4}
 
 # Short-training fitness budgets
@@ -87,7 +89,7 @@ SAVE_PATH=${SAVE_PATH:-phi_best.py}
 TOPK=${TOPK:-5}
 SEED=${SEED:-1234}
 GPU_IDS=${GPU_IDS:-0,1,2,3,4,5}        # e.g., "0,1,2,3" for parallel short-training; leave empty for CPU
-USE_CHEAP_LEVEL=${USE_CHEAP_LEVEL:-1}
+USE_CHEAP_LEVEL=${USE_CHEAP_LEVEL:-0}
 
 # Build command (no Ollama flags; we use remote API via env)
 cmd=(python examples/auto_find_phi_tsp20.py
