@@ -39,25 +39,6 @@ OPERATORS=${OPERATORS:-e1,e2,m1,m2,m3}
 OP_WEIGHTS=${OP_WEIGHTS:-1,1,1,1,0.3}
 TOURNAMENT_K=${TOURNAMENT_K:-4}
 
-# Short-training fitness budgets
-EPOCHS_PER_EVAL=${EPOCHS_PER_EVAL:-10}
-BATCH_SIZE=${BATCH_SIZE:-512}
-TRAIN_SIZE=${TRAIN_SIZE:-10000}
-VAL_SIZE=${VAL_SIZE:-1000}
-NUM_STARTS=${NUM_STARTS:-20}
-
-# PBRS shaping toggles
-GAMMA_CHOICES=${GAMMA_CHOICES:-"0.2,-0.1,0.1,0.5"}
-REWARD_SCALE=${REWARD_SCALE:-scale} # None|scale|norm
-CENTER_DPHI=${CENTER_DPHI:-1}
-NORM_DPHI=${NORM_DPHI:-1}
-
-# Diversity / archive / memetic
-MEMETIC_REPAIR_PROB=${MEMETIC_REPAIR_PROB:-0.25}
-ARCHIVE_TOP_K=${ARCHIVE_TOP_K:-32}
-ELITE_PARENT_K=${ELITE_PARENT_K:-4}
-ELITE_REPLACE_WORST=${ELITE_REPLACE_WORST:-2}
-
 # ===== Offline trajectories for Level-1 cheap eval =====
 OFFLINE_TRAJ_PATH=${OFFLINE_TRAJ_PATH:-data/tsp20_offline_trajs.pt}
 OFFLINE_NUM_EPISODES=${OFFLINE_NUM_EPISODES:-100000}
@@ -88,8 +69,6 @@ DUMP_DIR=${DUMP_DIR:-runs/eoh}
 SAVE_PATH=${SAVE_PATH:-phi_best.py}
 TOPK=${TOPK:-5}
 SEED=${SEED:-1234}
-GPU_IDS=${GPU_IDS:-0,1,2,3,4,5}        # e.g., "0,1,2,3" for parallel short-training; leave empty for CPU
-USE_CHEAP_LEVEL=${USE_CHEAP_LEVEL:-0}
 
 # Build command (no Ollama flags; we use remote API via env)
 cmd=(python examples/auto_find_phi_tsp20.py
@@ -99,43 +78,14 @@ cmd=(python examples/auto_find_phi_tsp20.py
   --operators "$OPERATORS"
   --operator-weights "$OP_WEIGHTS"
   --tournament-k "$TOURNAMENT_K"
-  --epochs-per-eval "$EPOCHS_PER_EVAL"
-  --batch-size "$BATCH_SIZE"
-  --train-size "$TRAIN_SIZE"
-  --val-size "$VAL_SIZE"
-  --num-starts "$NUM_STARTS"
-  --gamma-choices "$GAMMA_CHOICES"
-  --reward-scale "$REWARD_SCALE"
   --dump-dir "$DUMP_DIR"
   --save-path "$SAVE_PATH"
   --topk "$TOPK"
   --seed "$SEED"
   --offline-traj-path "$OFFLINE_TRAJ_PATH"
-  --cheap-level-weight="${CHEAP_LEVEL_WEIGHT:-0.1}"
-  --cheap-filter-threshold="${CHEAP_FILTER_THRESHOLD:--1e9}"
-  --cheap-topk-ratio="${CHEAP_TOPK_RATIO:-0.3}"
-  --max-candidates-rl-eval="${MAX_CANDIDATES_RL_EVAL:-8}"
-  --max-step-shaping-ratio="${MAX_STEP_SHAPING_RATIO:-10.0}"
-  --max-episode-shaping-ratio="${MAX_EPISODE_SHAPING_RATIO:-10.0}"
-  --max-var-ratio-shaped-vs-base="${MAX_VAR_RATIO_SHAPED_VS_BASE:-10.0}"
-  --min-abs-dphi-q95="${MIN_ABS_DPHI_Q95:-1e-4}"
-  --complexity-penalty-alpha="${COMPLEXITY_PENALTY_ALPHA:-0.001}"
   --cheap-eval-device "${CHEAP_EVAL_DEVICE}"
   --cheap-eval-batch-states "${CHEAP_EVAL_BATCH_STATES}"
-  --refine-top-k="${REFINE_TOP_K:-5}"
-  --refine-epochs="${REFINE_EPOCHS:-10}"
 )
-
-if [[ "${USE_CHEAP_LEVEL}" == "0" ]]; then
-  cmd+=(--no-cheap-level)
-fi
-
-if [[ "${CENTER_DPHI}" == "1" ]]; then cmd+=(--center-dphi); fi
-if [[ "${NORM_DPHI}" == "1" ]]; then cmd+=(--norm-dphi); fi
-
-if [[ -n "$GPU_IDS" ]]; then
-  cmd+=(--gpu-ids "$GPU_IDS")
-fi
 
 if [[ -n "$SEED_DUMP_DIR" ]]; then
   cmd+=(--seed-dump-dir "$SEED_DUMP_DIR")
