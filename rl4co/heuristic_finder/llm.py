@@ -297,8 +297,10 @@ def _generate_candidates_via_openai_compatible_api(
     model_name = model or os.environ.get(f"{prefix_upper}_MODEL", default_model)
 
     headers = {
+        "Accept": "application/json",
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
+        "User-Agent": "DMXAPI/1.0.0"
     }
 
     effective_system_prompt = system_prompt if system_prompt is not None else default_system_prompt
