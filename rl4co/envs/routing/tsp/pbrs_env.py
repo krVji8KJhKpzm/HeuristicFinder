@@ -148,8 +148,11 @@ class TSPStateView:
     #         d = d / self.graph_scale()
     #     return d
 
-    def distance_matrix(self) -> torch.Tensor:
+    def distance_matrix(self, normalize: bool = False) -> torch.Tensor:
         """Full pairwise distance matrix [batch, N, N]. Diagonal is 0.
+
+        The `normalize` argument is accepted for backward compatibility with
+        some heuristic code, but is currently ignored (no rescaling).
         """
         locs = self.locs  # [B,N,2]
         dif = locs.unsqueeze(-3) - locs.unsqueeze(-2)  # [B,N,N,2]

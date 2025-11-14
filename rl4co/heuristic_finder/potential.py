@@ -77,6 +77,16 @@ def compile_potential(code: str) -> Callable[[TSPStateView], torch.Tensor]:
             c = m.group(0)
         # Dedent for consistent indentation
         c = textwrap.dedent(c).strip()
+        # Fix common incorrect torch.Tensor.to usage from LLMs:
+        # `.to(torch.float32, device=...)` -> `.to(dtype=torch.float32, device=...)`
+        try:
+            c = re.sub(
+                r"\.to\(\s*(torch\.[A-Za-z0-9_]+)\s*,\s*device\s*=",
+                r".to(dtype=\1, device=",
+                c,
+            )
+        except Exception:
+            pass
         return c
 
     code = sanitize(code)
