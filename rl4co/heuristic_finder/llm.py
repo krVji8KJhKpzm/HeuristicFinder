@@ -6,6 +6,22 @@ import json
 import time
 
 
+def _available_helpers_text() -> str:
+    """Canonical list of state helpers exposed to the model.
+
+    Keep names/signatures aligned with InvariantTSPStateView in
+    rl4co/envs/routing/tsp/pbrs_env.py.
+    """
+    return (
+        "Available state helpers (batch-friendly):\n"
+        "Raw N-dependent ONLY (reduce to keep invariance): action_mask() -> [B,N] (True=unvisited); "
+        "visited_mask() -> [B,N]; unvisited_mask() -> [B,N];\n"
+        "  current_node_index() -> [B]; first_node_index() -> [B]; distance_matrix() -> [B,N,N] (diag=0).\n"
+        "  all_node_coords() -> [B,N,2]; partial_path_indices() -> [B,N] (visit order, -1 padded where missing).\n"
+        "Fixed-size (safe direct use): current_loc() -> [B,2]; start_loc() -> [B,2].\n"
+    )
+
+
 def format_prompt(env_name: str = "tsp", guidance: str = "") -> str:
     return (
         "You are designing a potential function Phi(state) for PBRS in "
@@ -18,10 +34,7 @@ def format_prompt(env_name: str = "tsp", guidance: str = "") -> str:
         "- Ensure result is broadcastable to [B,1]; handle NaNs via torch.nan_to_num.\n"
         "Goal: robust, node-count-invariant outputs. Use reductions (mean/max/min/std/softmin) over N-dependent tensors.\n"
         "Avoid Python loops; prefer vectorized torch ops.\n"
-        "Available state helpers (batch-friendly):\n"
-        "Raw N-dependent only (reduce to keep invariance): action_mask() -> [B,N] (True=unvisited); visited_mask() -> [B,N]; unvisited_mask() -> [B,N];\n"
-        "  current_node_index() -> [B]; first_node_index() -> [B]; distance_matrix() -> [B,N,N] (diag=0).\n"
-        "  all_node_coords() -> [B,N,2]; partial_path_indices() -> [B,N] (visit order, -1 padded where missing).\n"
+        + _available_helpers_text()
         "Do NOT use any other state.* helpers (e.g., visited_ratio, remaining_ratio, nearest/centroid/start distances, graph_scale, distances_from_current).\n"
         "Return a tensor broadcastable to [B,1]. Keep it simple and stable.\n"
         + guidance
@@ -880,10 +893,7 @@ def _phi_prompt_parts(env_name: str = "tsp") -> Dict[str, object]:
     func_inputs = ["state"]
     func_outputs = ["value"]
     inout_inf = (
-        "Input 'state' offers helper methods (batch-friendly):\n"
-        "Raw N-dependent ONLY (reduce over them): action_mask() -> [B,N] (True=unvisited); visited_mask() -> [B,N]; unvisited_mask() -> [B,N];\n"
-        "  current_node_index() -> [B]; first_node_index() -> [B];\n"
-        "  distance_matrix() -> [B,N,N] (diag=0).\n"
+        "Input 'state' offers helper methods (batch-friendly):\n" + _available_helpers_text()
     )
     # "Forbidden: visited_ratio, remaining_ratio, step_ratio, current_loc, start_loc, nearest/centroid/start distances, k-nearest/farthest, graph_scale, distances_from_current.\n"
     other_inf = (
