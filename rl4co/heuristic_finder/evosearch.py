@@ -96,7 +96,10 @@ class EvoConfig:
     elite_replace_worst: int = 1
     # Toggle Level-1 cheap evaluation stage
     use_cheap_level: bool = True
-    # Level 1 / Level 2 multi-stage evaluation
+    # Toggle Level-2 short RL evaluation stage
+    use_level2_rl: bool = True
+    # Level 1 / Level 2 multi-stage evaluation (Level-1 = offline credit-assignment diagnostics,
+    # Level-2 = short RL training evaluation)
     offline_traj_path: str = "data/tsp20_offline_trajs.pt"
     cheap_level_weight: float = 0.1
     cheap_filter_threshold: float = -1e9
@@ -911,8 +914,15 @@ def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[C
     if not specs:
         return []
 
+    use_cheap = bool(getattr(cfg, "use_cheap_level", True))
+    use_level2 = bool(getattr(cfg, "use_level2_rl", True))
+
     # Fast path: disable cheap Level-1 entirely -> evaluate everyone with Level-2 RL
-    if not bool(getattr(cfg, "use_cheap_level", True)):
+    if not use_cheap:
+        if not use_level2:
+            # Both cheap Level-1 and Level-2 RL are disabled: fall back to
+            # neutral scores so evolution can still proceed without crashing.
+            return [(c, 0.0) for c in specs]
         results: List[Tuple[Candidate, float]] = []
         gpu_ids = cfg.gpu_ids or []
         if not gpu_ids:
@@ -966,7 +976,7 @@ def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[C
                     results.append((cand, float(score)))
         return results
 
-    # ---------- Level 1: Cheap offline evaluation for all candidates ----------
+    # ---------- Level 1: Cheap offline credit-assignment evaluation for all candidates ----------
     offline_trajs = None
     if cfg.offline_traj_path and os.path.exists(cfg.offline_traj_path):
         try:
@@ -1028,6 +1038,24 @@ def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[C
             "stats": stats_dict,
         }
         cheap_rank_list.append((c, cheap_score))
+
+    # If Level-2 RL is disabled, use purely credit-assignment-based cheap scores
+    # (plus the same soft variance penalty) to rank candidates.
+    if not use_level2:
+        results: List[Tuple[Candidate, float]] = []
+        for c in specs:
+            m = meta.get((c.spec.code, c.gamma), {})
+            cheap = float(m.get("cheap_score", 0.0))
+            st = m.get("stats") or {}
+            total = cheap
+            try:
+                vr = st.get("var_ratio_shaped_vs_base", None)
+                if vr is not None and math.isfinite(vr):
+                    total -= 0.05 * max(0.0, float(vr) - 1.0)
+            except Exception:
+                pass
+            results.append((c, float(total)))
+        return results
 
     # Filter by cheap_score threshold, then keep top-K for Level 2 RL eval
     if offline_trajs is not None:

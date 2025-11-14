@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 """
-Offline trajectory collection for TSP to support cheap Level-1 PBRS potential evaluation.
+Offline trajectory collection for TSP to support credit-assignment-aware Level-1
+PBRS potential evaluation.
 
-This module collects trajectories using a baseline POMO model without PBRS and stores
-the minimal state needed to evaluate arbitrary potential functions phi(s) offline.
+This module collects trajectories using a baseline POMO model without PBRS and
+stores the minimal state needed to evaluate arbitrary potential functions
+phi(s) *offline*, together with generic per-step credit signals (returns and
+simple advantages) that can be reused by different credit-assignment metrics.
 
 Usage:
   python -m rl4co.heuristic_finder.offline_data_tsp20 \
@@ -16,14 +19,17 @@ Output file format (torch .pt): a dict with keys:
     - locs: Tensor [N,2]
     - first_node: int
     - actions: LongTensor [T]
-    - current_nodes: LongTensor [T]   (node before taking action t)
+    - current_nodes: LongTensor [T]      (node before taking action t)
     - action_masks: BoolTensor [T,N]
-    - base_step_reward: Tensor [T]    (negative edge length, r(s,a))
-    - final_reward: float             (negative tour length)
+    - base_step_reward: Tensor [T]       (negative edge length, r(s,a))
+    - returns: Tensor [T]                (undiscounted Monte Carlo return from t)
+    - advantages: Tensor [T]             (returns minus per-episode mean return)
+    - final_reward: float                (negative tour length)
   meta: { num_loc, seed }
 
-Note: We explicitly store base_step_reward as the negative edge length so it matches
-the PBRS shaping convention used in DensePBRSTSPEnv.
+Note: We explicitly store base_step_reward as the negative edge length so it
+matches the PBRS shaping convention used in DensePBRSTSPEnv, and derive
+returns/advantages from it as generic per-step credit signals.
 """
 
 import argparse
@@ -143,6 +149,13 @@ def collect_tsp20_trajectories(
                 tdb = env._step(tdb)
             # Base step rewards (negative edge length)
             base_steps = _negative_edge_lengths(locs_b, acts_b)
+            # Per-step undiscounted returns and simple advantages as generic
+            # credit signals (independent of any particular Phi or baseline).
+            # G_t = sum_{k>=t} r_k, gamma=1
+            returns = torch.flip(torch.cumsum(torch.flip(base_steps, dims=[0]), dim=0), dims=[0])
+            # Simple per-episode baseline: mean return over time
+            baseline = returns.mean()
+            advantages = returns - baseline
             episodes.append(
                 {
                     "locs": locs_b.cpu(),
@@ -151,6 +164,8 @@ def collect_tsp20_trajectories(
                     "current_nodes": torch.tensor(curr_nodes, dtype=torch.long),
                     "action_masks": torch.stack(masks, dim=0).cpu(),
                     "base_step_reward": base_steps.cpu(),
+                    "returns": returns.cpu(),
+                    "advantages": advantages.cpu(),
                     "final_reward": float(base_final[b].item()),
                 }
             )
