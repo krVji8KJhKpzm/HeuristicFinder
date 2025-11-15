@@ -724,29 +724,13 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
         for pop_idx in range(n_pops):
             scored = populations[pop_idx]
             # Optional: mix elite archive into parent pool by appending pseudo-scored elites
-            if cfg.elite_parent_k > 0:
-                elite_pack = archive.top_parents_pack(cfg.elite_parent_k)
-                # convert elite pack to temporary Candidates for parent pool only
+            if cfg.elite_parent_k > 0 and len(archive.entries) > 0:
+                # Reuse elite candidates and their actual fitness scores
+                k_elite = min(cfg.elite_parent_k, len(archive.entries))
                 temp_cands: List[Tuple[Candidate, float]] = []
-                for e in elite_pack:
-                    try:
-                        fn = compile_potential(e["code"])  # reuse compile here directly
-                        th = e.get("algorithm", None)
-                        ch = compute_code_hash(e["code"])
-                        temp_cands.append(
-                            (
-                                Candidate(
-                                    spec=PotentialSpec(name="elite", code=e["code"], fn=fn),
-                                    gamma=_init_gamma(cfg),
-                                    algorithm=th,
-                                    thought=th,
-                                    code_hash=ch,
-                                ),
-                                float("inf"),
-                            )
-                        )
-                    except Exception:
-                        continue
+                for i in range(k_elite):
+                    cand_e, score_e = archive.entries[i]
+                    temp_cands.append((cand_e, float(score_e)))
                 parent_pool = scored + temp_cands
             else:
                 parent_pool = scored
@@ -781,10 +765,12 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
                 # Optional elite replacement of worst
                 if cfg.elite_replace_worst > 0 and len(archive.entries) > 0:
                     k = min(cfg.elite_replace_worst, len(scored), len(archive.entries))
-                    elites_to_inject = [archive.entries[i][0] for i in range(k)]
-                    # replace last k individuals
+                    # replace last k individuals with elites and their true scores
                     for i in range(k):
-                        scored[-(i + 1)] = (elites_to_inject[i], float("inf"))
+                        scored[-(i + 1)] = (
+                            archive.entries[i][0],
+                            float(archive.entries[i][1]),
+                        )
                 populations[pop_idx] = scored
                 archive.update(scored)
                 if cfg.dump_dir:
