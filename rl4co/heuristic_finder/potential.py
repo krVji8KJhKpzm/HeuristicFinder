@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass
 import re
+import sys
 import textwrap
 from types import MappingProxyType
 from typing import Callable, Dict, Optional
@@ -10,6 +11,7 @@ from typing import Callable, Dict, Optional
 import torch
 
 from rl4co.envs.routing.tsp.pbrs_env import TSPStateView
+from rl4co.heuristic_finder.llm import eoh_llm_repair
 
 
 @dataclass
@@ -151,14 +153,115 @@ def compile_potential(code: str) -> Callable[[TSPStateView], torch.Tensor]:
     exec(compile(tree, filename="<potential>", mode="exec"), ns, ns)
     if "phi" not in ns or not callable(ns["phi"]):
         raise ValueError("Potential code must define a callable `phi(state)`")
-    fn = ns["phi"]  # type: ignore
+
+    # Underlying callable we will invoke (can be replaced if repair succeeds)
+    inner_fn = ns["phi"]  # type: ignore
+    src_code = code
+    repair_attempted = False
+
+    def _safe_phi(state):
+        """Wrapped potential with auto-repair and shape normalization.
+
+        Behavior:
+        - Try the current implementation `inner_fn`.
+        - On the first runtime error, ask the LLM (eoh_llm_repair) to repair the
+          code, recompile, and retry once.
+        - If repair fails or still errors, re-raise the exception (no silent
+          zero fallback); callers decide how to penalize this candidate.
+        """
+        nonlocal inner_fn, src_code, repair_attempted
+
+        def _eval_and_normalize(fn, st):
+            out = fn(st)
+            if not isinstance(out, torch.Tensor):
+                out = torch.as_tensor(out, dtype=torch.float32)
+            if out.dim() == 1:
+                out = out.unsqueeze(-1)
+            try:
+                base = getattr(st, "_base", st)
+                locs = getattr(base, "locs", None)
+                if isinstance(locs, torch.Tensor):
+                    out = out.to(dtype=torch.float32, device=locs.device)
+                else:
+                    out = out.to(dtype=torch.float32)
+            except Exception:
+                out = out.to(dtype=torch.float32)
+            out = torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+            out = torch.clamp(out, min=-1e3, max=1e3)
+            return out
+
+        try:
+            return _eval_and_normalize(inner_fn, state)
+        except Exception as exc:
+            # Log original failing source once
+            src = getattr(_safe_phi, "_source_code", None)
+            already = getattr(_safe_phi, "_error_logged", False)
+            if src is not None and not already:
+                try:
+                    print(
+                        "[HeuristicFinder] Runtime error in phi(state); source code follows:",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    print("=" * 80, file=sys.stderr, flush=True)
+                    print(src, file=sys.stderr, flush=True)
+                    print("=" * 80, file=sys.stderr, flush=True)
+                except Exception:
+                    pass
+                try:
+                    setattr(_safe_phi, "_error_logged", True)
+                except Exception:
+                    pass
+
+            # Only attempt automatic repair once
+            if not repair_attempted:
+                repair_attempted = True
+                try:
+                    repaired = eoh_llm_repair(
+                        model=None,
+                        parent_code=src_code,
+                        env_name="tsp",
+                        n=1,
+                        debug=False,
+                        stream=False,
+                    )
+                except Exception:
+                    repaired = []
+
+                if repaired:
+                    new_code = repaired[0]
+                    try:
+                        # Recompile repaired code into a new safe potential
+                        new_fn = compile_potential(new_code)
+                        inner_fn = new_fn
+                        src_code = new_code
+                        try:
+                            setattr(_safe_phi, "_source_code", src_code)
+                        except Exception:
+                            pass
+                        # Retry once with the repaired implementation
+                        return _eval_and_normalize(inner_fn, state)
+                    except Exception:
+                        # Fall through to re-raise original exception below
+                        pass
+
+            # If we reach here, either repair was already attempted or failed;
+            # propagate the original error so callers can penalize this phi.
+            raise exc
+
+    # Attach sanitized source code for later debugging (used by logs and tooling)
     try:
-        # Attach sanitized source code for later debugging (e.g., runtime errors)
-        setattr(fn, "_source_code", code)
+        setattr(_safe_phi, "_source_code", code)
     except Exception:
-        # Best-effort only; do not fail compilation if attribute set fails
         pass
-    return fn
+
+    # Also keep a reference to the raw function in case advanced tooling needs it
+    try:
+        setattr(_safe_phi, "_raw_fn", raw_fn)
+    except Exception:
+        pass
+
+    return _safe_phi
 
 
 # Note: built-in seed potentials were removed. Use LLM-based initialization instead.
