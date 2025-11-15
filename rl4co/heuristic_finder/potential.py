@@ -151,7 +151,14 @@ def compile_potential(code: str) -> Callable[[TSPStateView], torch.Tensor]:
     exec(compile(tree, filename="<potential>", mode="exec"), ns, ns)
     if "phi" not in ns or not callable(ns["phi"]):
         raise ValueError("Potential code must define a callable `phi(state)`")
-    return ns["phi"]  # type: ignore
+    fn = ns["phi"]  # type: ignore
+    try:
+        # Attach sanitized source code for later debugging (e.g., runtime errors)
+        setattr(fn, "_source_code", code)
+    except Exception:
+        # Best-effort only; do not fail compilation if attribute set fails
+        pass
+    return fn
 
 
 # Note: built-in seed potentials were removed. Use LLM-based initialization instead.

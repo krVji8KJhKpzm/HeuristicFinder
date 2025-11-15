@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import math
 import re
+import sys
 
 import torch
 
@@ -69,11 +70,11 @@ def _build_batched_state_view(
     device: torch.device,
 ) -> TSPStateView:
     return TSPStateView(
-        locs=locs.to(device),
-        i=i.view(-1, 1).to(torch.int64, device=device),
-        current_node=current_node.to(torch.int64, device=device),
-        first_node=first_node.to(torch.int64, device=device),
-        action_mask=action_mask.to(torch.bool, device=device),
+        locs=locs.to(device=device),
+        i=i.view(-1, 1).to(device=device, dtype=torch.int64),
+        current_node=current_node.to(device=device, dtype=torch.int64),
+        first_node=first_node.to(device=device, dtype=torch.int64),
+        action_mask=action_mask.to(device=device, dtype=torch.bool),
     )
 
 
@@ -132,8 +133,25 @@ def compute_phi_stats(
             sv_a = _build_batched_state_view(locs_a, i_a, cur_a, fir_a, m_a, device)
             inv_b = InvariantTSPStateView(sv_b)
             inv_a = InvariantTSPStateView(sv_a)
-            phi_b = phi_fn(inv_b)
-            phi_a = phi_fn(inv_a)
+            try:
+                phi_b = phi_fn(inv_b)
+                phi_a = phi_fn(inv_a)
+            except Exception as e:
+                src = getattr(phi_fn, "_source_code", None)
+                if src is not None:
+                    print(
+                        "[HeuristicFinder] Runtime error in phi(state) during compute_phi_stats; source code follows:",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    try:
+                        # Print a separator to make logs easier to scan
+                        print("=" * 80, file=sys.stderr, flush=True)
+                        print(src, file=sys.stderr, flush=True)
+                        print("=" * 80, file=sys.stderr, flush=True)
+                    except Exception:
+                        pass
+                raise
             if not isinstance(phi_b, torch.Tensor):
                 phi_b = torch.as_tensor(phi_b, dtype=torch.float32, device=device)
             if not isinstance(phi_a, torch.Tensor):
@@ -384,7 +402,24 @@ def mse_phi_vs_value(
 
             sv = _build_batched_state_view(locs_b, i_b, curr_b, first_b, mask_b, device)
             inv = InvariantTSPStateView(sv)
-            phi = phi_fn(inv)
+            try:
+                phi = phi_fn(inv)
+            except Exception as e:
+                src = getattr(phi_fn, "_source_code", None)
+                if src is not None:
+                    print(
+                        "[HeuristicFinder] Runtime error in phi(state) during mse_phi_vs_value; source code follows:",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    try:
+                        print("=" * 80, file=sys.stderr, flush=True)
+                        print(src, file=sys.stderr, flush=True)
+                        print("=" * 80, file=sys.stderr, flush=True)
+                    except Exception:
+                        pass
+                # Re-raise so callers (e.g., evolutionary loop) can handle/penalize this candidate
+                raise
             if not isinstance(phi, torch.Tensor):
                 phi = torch.as_tensor(phi, dtype=torch.float32, device=device)
             phi = torch.nan_to_num(phi, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32)
