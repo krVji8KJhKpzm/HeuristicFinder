@@ -279,7 +279,7 @@ def compute_phi_stats(
         )
     corr_sum_dphi_final_reward = _pearsonr(sum_dphi_t, final_reward_t) if final_reward_t.numel() > 1 else None
 
-    return PhiStats(
+    out = PhiStats(
         mean_dphi=mean_dphi,
         std_dphi=std_dphi,
         abs_dphi_q95=abs_dphi_q95,
@@ -290,6 +290,15 @@ def compute_phi_stats(
         corr_phi0_final_reward=corr_phi0_final_reward,
         corr_sum_dphi_final_reward=corr_sum_dphi_final_reward,
     )
+
+    # Proactively release cached GPU memory after evaluation when using CUDA.
+    try:
+        if device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+    return out
 
 
 def _complexity_of_code(code: str) -> float:
@@ -481,5 +490,20 @@ def mse_phi_vs_value(
 
     if n_total == 0:
         # No valid states; treat as infinitely bad
+        try:
+            if device.type == "cuda" and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
         return float("inf")
-    return float(mse_sum / float(n_total))
+
+    mse = float(mse_sum / float(n_total))
+
+    # Proactively release cached GPU memory after evaluation when using CUDA.
+    try:
+        if device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+    return mse
