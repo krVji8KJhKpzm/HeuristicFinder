@@ -140,7 +140,7 @@ def compute_phi_stats(
                 src = getattr(phi_fn, "_source_code", None)
                 if src is not None:
                     print(
-                        "[HeuristicFinder] Runtime error in phi(state) during compute_phi_stats; source code follows:",
+                        f"[HeuristicFinder] Runtime error in phi(state) during compute_phi_stats: {e} \n source code follows:",
                         file=sys.stderr,
                         flush=True,
                     )
@@ -408,7 +408,7 @@ def mse_phi_vs_value(
                 src = getattr(phi_fn, "_source_code", None)
                 if src is not None:
                     print(
-                        "[HeuristicFinder] Runtime error in phi(state) during mse_phi_vs_value; source code follows:",
+                        f"[HeuristicFinder] Runtime error in phi(state) during mse_phi_vs_value: {e}\n source code follows:",
                         file=sys.stderr,
                         flush=True,
                     )

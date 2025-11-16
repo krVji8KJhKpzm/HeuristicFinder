@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import glob
 import json
@@ -806,10 +806,7 @@ def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[C
             except Exception:
                 offline_trajs = None
 
-    if offline_trajs is None:
-        # If no dataset is available, fall back to neutral scores so the loop
-        # can still progress (though results will be meaningless).
-        return [(c, 0.0) for c in specs]
+    assert offline_trajs is not None, f"can't find offline data in {path}"
 
     results: List[Tuple[Candidate, float]] = []
     for c in specs:

@@ -998,6 +998,7 @@ def eoh_llm_repair(model: Optional[str], parent_code: str, env_name: str = "tsp"
     The model should return ONLY a fenced Python code block for `def phi(state): ...`.
     The first line should be a comment like '# THOUGHT: {short rationale}'.
     """
+    print("Repairing code via llm...", flush=True)
     guidance = (
         "Lightly revise the function to: enforce broadcasting to [B,1], replace NaNs via torch.nan_to_num,"
         " prefer reductions over N-dependent tensors, avoid hard-coded N, and clamp magnitudes."

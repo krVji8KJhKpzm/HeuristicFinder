@@ -199,7 +199,7 @@ def compile_potential(code: str) -> Callable[[TSPStateView], torch.Tensor]:
             if src is not None and not already:
                 try:
                     print(
-                        "[HeuristicFinder] Runtime error in phi(state); source code follows:",
+                        f"[HeuristicFinder] Runtime error in phi(state): {exc} \n source code follows:",
                         file=sys.stderr,
                         flush=True,
                     )
