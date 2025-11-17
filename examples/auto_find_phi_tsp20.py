@@ -78,6 +78,12 @@ def parse_args() -> argparse.Namespace:
 
     # Level 1 / Level 2 multi-stage config
     p.add_argument("--offline-traj-path", type=str, default="data/tsp20_offline_trajs.pt")
+    p.add_argument(
+        "--offline-traj-paths-multi",
+        type=str,
+        default=None,
+        help="Comma-separated list of additional offline trajectory paths for multi-scale diagnostics (e.g., tsp20,tsp50,tsp100).",
+    )
     p.add_argument("--cheap-level-weight", type=float, default=0.1)
     p.add_argument("--cheap-filter-threshold", type=float, default=-1e9)
     p.add_argument("--cheap-topk-ratio", type=float, default=0.3)
@@ -130,6 +136,13 @@ def main():
 
     # If no Ollama model, evolution falls back to DeepSeek API using DEEPSEEK_API_KEY
 
+    if args.offline_traj_paths_multi:
+        offline_traj_paths_multi: List[str] = [
+            p for p in args.offline_traj_paths_multi.split(",") if p.strip()
+        ]
+    else:
+        offline_traj_paths_multi = None
+
     cfg = EvoConfig(
         n_pops=args.n_pops,
         pop_size=args.pop_size,
@@ -159,6 +172,7 @@ def main():
         elite_parent_k=int(args.elite_parent_k),
         elite_replace_worst=int(args.elite_replace_worst),
         offline_traj_path=args.offline_traj_path,
+        offline_traj_paths_multi=offline_traj_paths_multi,
         cheap_level_weight=float(args.cheap_level_weight),
         cheap_filter_threshold=float(args.cheap_filter_threshold),
         cheap_topk_ratio=float(args.cheap_topk_ratio),

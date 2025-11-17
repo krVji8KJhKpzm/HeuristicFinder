@@ -23,7 +23,6 @@ from rl4co.heuristic_finder.llm import (
     eoh_llm_repair,
 )
 from rl4co.heuristic_finder.potential import PotentialSpec, compile_potential
-from rl4co.heuristic_finder.llm import _ensure_thought_line
 # diagnostics removed in EoH-faithful loop (no reflection)
 
 
@@ -38,7 +37,6 @@ class Candidate:
     spec: PotentialSpec
     gamma: float
     algorithm: Optional[str] = None
-    thought: Optional[str] = None
     code_hash: Optional[str] = None
     # Diagnostics / reflections
     stats: Optional[Dict[str, float]] = None
@@ -104,6 +102,8 @@ class EvoConfig:
     # Level 1 / Level 2 multi-stage evaluation (Level-1 = offline credit-assignment diagnostics,
     # Level-2 = short RL training evaluation)
     offline_traj_path: str = "data/tsp20_offline_trajs.pt"
+    # Optional: additional offline datasets (e.g., for TSP-20/50/100) used for diagnostics
+    offline_traj_paths_multi: Optional[List[str]] = None
     cheap_level_weight: float = 0.1
     cheap_filter_threshold: float = -1e9
     cheap_topk_ratio: float = 0.3
@@ -130,7 +130,6 @@ def compile_candidates(codes: List[str]) -> List[PotentialSpec]:
     out: List[PotentialSpec] = []
     for i, code in enumerate(codes):
         try:
-            code = _ensure_thought_line(code)
             fn = compile_potential(code)
         except Exception:
             continue
@@ -196,11 +195,16 @@ def _load_seed_candidates(seed_dir: str, max_count: int, cfg: EvoConfig) -> List
                 gamma_val = None
         if gamma_val is None:
             gamma_val = _init_gamma(cfg)
+        alg = rec.get("algorithm")
+        if not alg and getattr(cfg, "enable_thought", True):
+            try:
+                alg = extract_algorithm(code)
+            except Exception:
+                alg = None
         cand = Candidate(
             spec=PotentialSpec(name=f"seed_{idx}", code=code, fn=fn),
             gamma=gamma_val,
-            algorithm=rec.get("algorithm"),
-            thought=rec.get("thought"),
+            algorithm=alg,
             code_hash=code_hash,
             stats=rec.get("stats"),
             stats_text=rec.get("stats_text"),
@@ -245,12 +249,13 @@ def _tournament_select(scored: List[Tuple[Candidate, float]], m: int, k: int) ->
 def _parents_pack(pars: List[Candidate]) -> List[dict]:
     pack = []
     for p in pars:
-        alg = None
-        if p.algorithm is not None and len(p.algorithm) > 0:
-            alg = p.algorithm
-        elif p.thought is not None and len(p.thought) > 0:
-            alg = p.thought
-        else:
+        alg = p.algorithm
+        if not alg:
+            try:
+                alg = extract_algorithm(p.spec.code)
+            except Exception:
+                alg = None
+        if not alg:
             alg = "(no description)"
         entry = {"algorithm": alg, "code": p.spec.code}
         if p.stats_text:
@@ -320,10 +325,9 @@ def _propose_offspring_for_operator(
             specs = compile_candidates(codes)
             for sp in specs:
                 g = _mutate_gamma(_init_gamma(cfg), cfg) if cfg.mutate_gamma else _init_gamma(cfg)
-                th = extract_thought(sp.code) if cfg.enable_thought else None
-                alg = th  # align with EoH: keep a separate 'algorithm' field
+                alg = extract_algorithm(sp.code) if cfg.enable_thought else None
                 ch = compute_code_hash(sp.code)
-                out.append(Candidate(spec=sp, gamma=g, algorithm=alg, thought=th, code_hash=ch))
+                out.append(Candidate(spec=sp, gamma=g, algorithm=alg, code_hash=ch))
         except Exception:
             continue
 
@@ -361,24 +365,17 @@ class EliteArchive:
                 try:
                     with open(self.dump_path, "a", encoding="utf-8") as f:
                         for c, s in scored:
-                            # Ensure thought is populated; fall back to extracting from code
+                            # Ensure algorithm is present; fall back to extracting from code
                             try:
-                                _thought = c.thought if c.thought else extract_thought(c.spec.code)
+                                _algorithm = c.algorithm if c.algorithm else extract_algorithm(c.spec.code)
                             except Exception:
-                                _thought = c.thought
-                            # Ensure algorithm is present (prefer explicit field, then thought, then extraction)
-                            _algorithm = None
-                            if c.algorithm is not None and len(c.algorithm) > 0:
                                 _algorithm = c.algorithm
-                            else:
-                                _algorithm = _thought if _thought else extract_thought(c.spec.code)
                             _stats = c.stats if c.stats is not None else None
                             _stats_text = c.stats_text if c.stats_text is not None else None
                             rec = {
                                 "score": float(s),
                                 "gamma": float(c.gamma),
                                 "algorithm": _algorithm,
-                                "thought": _thought,
                                 "code_hash": c.code_hash or compute_code_hash(c.spec.code),
                                 "code": c.spec.code,
                                 "stats": _stats,
@@ -396,17 +393,19 @@ class EliteArchive:
         sel = self.entries[: min(k, len(self.entries))]
         pack = []
         for c, _ in sel:
-            if c.algorithm is not None and len(c.algorithm) > 0:
-                alg = c.algorithm
-            elif c.thought is not None and len(c.thought) > 0:
-                alg = c.thought
-            else:
+            alg = c.algorithm
+            if not alg:
+                try:
+                    alg = extract_algorithm(c.spec.code)
+                except Exception:
+                    alg = None
+            if not alg:
                 alg = "(no description)"
             pack.append({"algorithm": alg, "code": c.spec.code})
         return pack
 
 
-# ---------------- Diversity & Thought helpers -----------------
+# ---------------- Diversity & Algorithm helpers -----------------
 import ast
 import hashlib
 import math
@@ -430,20 +429,33 @@ def compute_code_hash(code: str) -> str:
     return h
 
 
-def extract_thought(code: str) -> Optional[str]:
+def extract_algorithm(text: str) -> Optional[str]:
+    """Extract one-sentence algorithm description using EoH-style rules.
+
+    Primary rule: take the first {...} block content.
+    Fallback: take the prefix before 'python' / 'import' / 'def'.
+    """
     try:
-        # Prefer brace-wrapped form: # THOUGHT: { ... }
-        m = re.search(r"^\s*#\s*THOUGHT:\s*\{([^}]*)\}\s*$", code, flags=re.IGNORECASE | re.MULTILINE)
+        # 1) Prefer the first brace-wrapped segment
+        m = re.search(r"\{(.*)\}", text, flags=re.DOTALL)
         if m:
-            return m.group(1).strip()
-        # Fallback: accept a plain line without braces: # THOUGHT: ...
-        m2 = re.search(r"^\s*#\s*THOUGHT:\s*(.+?)\s*$", code, flags=re.IGNORECASE | re.MULTILINE)
-        if m2:
-            txt = m2.group(1).strip()
-            # Strip surrounding braces if present
-            if txt.startswith("{") and txt.endswith("}"):
-                txt = txt[1:-1].strip()
-            return txt
+            alg = m.group(1).strip()
+            if alg:
+                return " ".join(alg.split())
+
+        # 2) Fallback: prefix before keywords, as in original EoH _get_alg
+        prefix_candidates: List[str] = []
+        if "python" in text:
+            prefix_candidates = re.findall(r"^.*?(?=python)", text, flags=re.DOTALL)
+        elif "import" in text:
+            prefix_candidates = re.findall(r"^.*?(?=import)", text, flags=re.DOTALL)
+        else:
+            prefix_candidates = re.findall(r"^.*?(?=def)", text, flags=re.DOTALL)
+
+        if prefix_candidates:
+            alg = prefix_candidates[0].strip()
+            if alg:
+                return " ".join(alg.split())
     except Exception:
         return None
     return None
@@ -698,7 +710,7 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
                 print(init_codes)
                 raise RuntimeError("LLM produced no valid initial candidates. Check provider, API key, and model.")
             for s in specs:
-                th = extract_thought(s.code) if cfg.enable_thought else None
+                alg = extract_algorithm(s.code) if cfg.enable_thought else None
                 h = compute_code_hash(s.code)
                 if cfg.dedup_within_pop and h in seen_pop:
                     continue
@@ -707,7 +719,7 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
                 seen_pop.add(h)
                 seen_global.add(h)
                 init_cands.append(
-                    Candidate(spec=s, gamma=_init_gamma(cfg), algorithm=th, thought=th, code_hash=h)
+                    Candidate(spec=s, gamma=_init_gamma(cfg), algorithm=alg, code_hash=h)
                 )
         # Evaluate and keep top-N (fitness is 1 / MSE)
         scored_init = _evaluate_population(init_cands, cfg)
@@ -793,27 +805,44 @@ def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[C
     if not specs:
         return []
 
-    # Load (and cache) offline trajectories containing states and Monte Carlo values
-    offline_trajs = None
-    path = getattr(cfg, "offline_traj_path", None)
-    if path:
-        if path in _OFFLINE_TRAJ_CACHE:
-            offline_trajs = _OFFLINE_TRAJ_CACHE[path]
-        elif os.path.exists(path):
-            try:
-                offline_trajs = load_offline_trajectories(path)
-                _OFFLINE_TRAJ_CACHE[path] = offline_trajs
-            except Exception:
-                offline_trajs = None
+    # Load (and cache) offline trajectories containing states and Monte Carlo values.
+    # Support a main path for fitness and optional multiple paths for diagnostics.
+    main_path = getattr(cfg, "offline_traj_path", None)
+    multi_paths = getattr(cfg, "offline_traj_paths_multi", None) or []
+    paths: List[str] = []
+    if main_path:
+        paths.append(main_path)
+    for pth in multi_paths:
+        if pth and pth not in paths:
+            paths.append(pth)
 
-    assert offline_trajs is not None, f"can't find offline data in {path}"
+    offline_sets: Dict[str, Dict[str, object]] = {}
+    for pth in paths:
+        if not pth:
+            continue
+        data = None
+        if pth in _OFFLINE_TRAJ_CACHE:
+            data = _OFFLINE_TRAJ_CACHE[pth]
+        elif os.path.exists(pth):
+            try:
+                data = load_offline_trajectories(pth)
+                _OFFLINE_TRAJ_CACHE[pth] = data
+            except Exception:
+                data = None
+        if data is not None:
+            offline_sets[pth] = data
+
+    assert offline_sets, f"can't find offline data in any of: {paths if paths else '[none specified]'}"
+    # Choose dataset used for fitness (default: cfg.offline_traj_path or first available)
+    fitness_path = main_path if (main_path and main_path in offline_sets) else next(iter(offline_sets.keys()))
+    fitness_trajs = offline_sets[fitness_path]
 
     results: List[Tuple[Candidate, float]] = []
     for c in specs:
         try:
             mse = mse_phi_vs_value(
                 c.spec.fn,
-                offline_trajs,
+                fitness_trajs,
                 device=getattr(cfg, "cheap_eval_device", "cpu"),
                 batch_states=getattr(cfg, "cheap_eval_batch_states", None),
                 target="future_cost",
@@ -829,19 +858,66 @@ def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[C
 
         # Attach simple stats for logging / dumps
         stats_dict: Dict[str, float] = {}
+        # Main dataset metrics
         if math.isfinite(mse) and mse >= 0.0:
             stats_dict["mse"] = float(mse)
             try:
                 stats_dict["rmse"] = float(math.sqrt(mse))
             except Exception:
                 stats_dict["rmse"] = float("nan")
+
+        # Multi-scale diagnostics: per-dataset MSE/RMSE (e.g., tsp20/tsp50/tsp100).
+        for pth, trajs in offline_sets.items():
+            try:
+                mse_k = mse_phi_vs_value(
+                    c.spec.fn,
+                    trajs,
+                    device=getattr(cfg, "cheap_eval_device", "cpu"),
+                    batch_states=getattr(cfg, "cheap_eval_batch_states", None),
+                    target="future_cost",
+                )
+            except Exception:
+                mse_k = float("inf")
+            if not math.isfinite(mse_k) or mse_k < 0.0:
+                continue
+            # Derive a short label from meta.num_loc if available, else from filename.
+            label = None
+            try:
+                meta = trajs.get("meta", {}) if isinstance(trajs, dict) else {}
+                num_loc = meta.get("num_loc", None)
+                if isinstance(num_loc, int):
+                    label = f"tsp{num_loc}"
+            except Exception:
+                label = None
+            if not label:
+                base = os.path.basename(pth)
+                label = os.path.splitext(base)[0]
+            key_mse = f"mse_{label}"
+            key_rmse = f"rmse_{label}"
+            stats_dict[key_mse] = float(mse_k)
+            try:
+                stats_dict[key_rmse] = float(math.sqrt(mse_k))
+            except Exception:
+                stats_dict[key_rmse] = float("nan")
+
         c.stats = stats_dict if stats_dict else None
         if stats_dict:
             parts = []
+            # Always show global mse/rmse first if present
             if "mse" in stats_dict:
                 parts.append(f"mse={stats_dict['mse']:.6g}")
             if "rmse" in stats_dict and math.isfinite(stats_dict["rmse"]):
                 parts.append(f"rmse={stats_dict['rmse']:.6g}")
+            # Then show per-dataset metrics in sorted order
+            for k in sorted(stats_dict.keys()):
+                if k in ("mse", "rmse"):
+                    continue
+                v = stats_dict[k]
+                try:
+                    if math.isfinite(v):
+                        parts.append(f"{k}={float(v):.6g}")
+                except Exception:
+                    parts.append(f"{k}={v}")
             c.stats_text = "; ".join(parts)
         else:
             c.stats_text = None
@@ -862,10 +938,12 @@ def _dump_candidates(dump_dir: str, results: List[Tuple[Candidate, float]], gen_
         base = f"gen{gen_idx:02d}_cand{i:03d}_{_sanitize_filename(cand.spec.name)}_{score:.4f}.py"
         path = os.path.join(dump_dir, base)
         try:
-            thought = cand.thought if cand.thought else extract_thought(cand.spec.code)
-            algorithm = cand.algorithm if cand.algorithm else thought
-            if not thought and algorithm:
-                thought = algorithm
+            algorithm = cand.algorithm
+            if not algorithm:
+                try:
+                    algorithm = extract_algorithm(cand.spec.code)
+                except Exception:
+                    algorithm = None
             code_hash = cand.code_hash if cand.code_hash else compute_code_hash(cand.spec.code)
             with open(path, "w", encoding="utf-8") as f:
                 f.write(f"# score={float(score):.6f}\n")
@@ -878,13 +956,13 @@ def _dump_candidates(dump_dir: str, results: List[Tuple[Candidate, float]], gen_
                     f.write(f"# code_hash={code_hash}\n")
                 if cand.stats_text:
                     f.write(f"# stats: {cand.stats_text}\n")
-                if thought:
+                if algorithm:
                     # keep the one-sentence idea; ensure braces for consistency
-                    if not (thought.startswith("{") and thought.endswith("}")):
-                        tline = "# THOUGHT: {" + thought + "}"
+                    if not (algorithm.startswith("{") and algorithm.endswith("}")):
+                        aline = "# ALGORITHM: {" + algorithm + "}"
                     else:
-                        tline = "# THOUGHT: " + thought
-                    f.write(tline + "\n")
+                        aline = "# ALGORITHM: " + algorithm
+                    f.write(aline + "\n")
                 f.write(cand.spec.code)
             # append manifest entry
             try:
@@ -898,7 +976,6 @@ def _dump_candidates(dump_dir: str, results: List[Tuple[Candidate, float]], gen_
                     "gamma": float(cand.gamma),
                     "code_hash": code_hash,
                     "algorithm": algorithm,
-                    "thought": thought,
                     "stats": cand.stats if cand.stats is not None else None,
                     "stats_text": cand.stats_text if cand.stats_text is not None else None,
                 }
