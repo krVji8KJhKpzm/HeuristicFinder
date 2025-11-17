@@ -721,7 +721,7 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
                 init_cands.append(
                     Candidate(spec=s, gamma=_init_gamma(cfg), algorithm=alg, code_hash=h)
                 )
-        # Evaluate and keep top-N (fitness is 1 / MSE)
+        # Evaluate and keep top-N (fitness is 1 / MSE over worst-case multi-scale MSE)
         scored_init = _evaluate_population(init_cands, cfg)
         scored_init.sort(key=lambda x: x[1], reverse=True)
         scored_init = scored_init[:pop_size]
@@ -899,6 +899,31 @@ def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[C
                 stats_dict[key_rmse] = float(math.sqrt(mse_k))
             except Exception:
                 stats_dict[key_rmse] = float("nan")
+
+        # Override fitness: use worst-case (largest) MSE across all scales.
+        mse_worst = None
+        for key, val in stats_dict.items():
+            if not key.startswith("mse"):
+                continue
+            if key in ("mse_worst",):
+                continue
+            try:
+                v = float(val)
+            except Exception:
+                continue
+            if not math.isfinite(v) or v < 0.0:
+                continue
+            if mse_worst is None or v > mse_worst:
+                mse_worst = v
+        if mse_worst is not None:
+            fitness = 1.0 / float(mse_worst)
+            stats_dict["mse_worst"] = float(mse_worst)
+            try:
+                stats_dict["rmse_worst"] = float(math.sqrt(mse_worst))
+            except Exception:
+                stats_dict["rmse_worst"] = float("nan")
+        else:
+            fitness = 0.0
 
         c.stats = stats_dict if stats_dict else None
         if stats_dict:
