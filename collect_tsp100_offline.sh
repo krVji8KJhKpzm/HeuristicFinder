@@ -11,8 +11,9 @@ BATCH_SIZE="${BATCH_SIZE:-512}"
 SEED="${SEED:-1234}"
 NUM_LOC="${NUM_LOC:-100}"
 DEVICE="${DEVICE:-cuda}"          # use 'cuda' for GPU, 'cpu' for CPU
-SOLVER="${SOLVER:-concorde}"      # use pyconcorde to generate optimal tours
+SOLVER="${SOLVER:-concorde}"      # 'concorde' or 'lkh' (exact solvers), or 'pomo'
 CONCORDE_WORKERS="${CONCORDE_WORKERS:-0}"  # 0 or <=0 means auto-detect
+LKH_EXE="${LKH_EXE:-LKH}"         # LKH executable name or path (when SOLVER=lkh)
 
 mkdir -p "$(dirname "$OUT_PATH")"
 
@@ -25,4 +26,5 @@ python -m rl4co.heuristic_finder.offline_data_tsp20 \
   --num-loc "${NUM_LOC}" \
   --device "${DEVICE}" \
   --solver "${SOLVER}" \
-  --concorde-workers "${CONCORDE_WORKERS}"
+  --concorde-workers "${CONCORDE_WORKERS}" \
+  --lkh-exe "${LKH_EXE}"
