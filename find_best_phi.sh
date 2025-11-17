@@ -16,10 +16,10 @@ export DEEPSEEK_MAX_TOKENS="${DEEPSEEK_MAX_TOKENS:-32768}"
 export DEEPSEEK_TEMPERATURE="${DEEPSEEK_TEMPERATURE:-0.0}"
 export DEEPSEEK_STREAM="${DEEPSEEK_STREAM:-false}"
 # Kimi overrides (used when provider is kimi)
-export KIMI_API_BASE="${KIMI_API_BASE:-https://api.moonshot.cn/v1}"
-export KIMI_MODEL="${KIMI_MODEL:-kimi-k2-turbo-preview}"
-# export KIMI_API_BASE="${KIMI_API_BASE:-https://api.bltcy.ai/v1}"
-# export KIMI_MODEL="${KIMI_MODEL:-gpt-4o-mini}"
+# export KIMI_API_BASE="${KIMI_API_BASE:-https://api.moonshot.cn/v1}"
+# export KIMI_MODEL="${KIMI_MODEL:-kimi-k2-turbo-preview}"
+export KIMI_API_BASE="${KIMI_API_BASE:-https://api.bltcy.ai/v1}"
+export KIMI_MODEL="${KIMI_MODEL:-gemini-2.5-pro}"
 export KIMI_MAX_TOKENS="${KIMI_MAX_TOKENS:-8192}"
 export KIMI_TEMPERATURE="${KIMI_TEMPERATURE:-0.6}"
 export KIMI_STREAM="${KIMI_STREAM:-false}"
@@ -96,10 +96,12 @@ cmd=(python examples/auto_find_phi_tsp20.py
   --save-path "$SAVE_PATH"
   --topk "$TOPK"
   --seed "$SEED"
-  --offline-traj-path "$OFFLINE_TRAJ_PATH_100"
+#   --offline-traj-path "$OFFLINE_TRAJ_PATH_100"
   --offline-traj-paths-multi "${OFFLINE_TRAJ_PATH_20},${OFFLINE_TRAJ_PATH_50},${OFFLINE_TRAJ_PATH_100}"
   --cheap-eval-device "${CHEAP_EVAL_DEVICE}"
   --cheap-eval-batch-states "${CHEAP_EVAL_BATCH_STATES}"
+  --elite-parent-k 0
+  --elite-replace-worst 0
 )
 
 if [[ -n "$SEED_DUMP_DIR" ]]; then
