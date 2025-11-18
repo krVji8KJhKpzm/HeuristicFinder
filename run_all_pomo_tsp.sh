@@ -43,40 +43,47 @@ for e in "${EPOCHS_TSP100[@]}"; do
   TASKS+=("train_pomo_tsp100.sh ${e}")
 done
 
-FIFO="pomo_tasks_$$"
-rm -f "${FIFO}"
-mkfifo "${FIFO}"
+declare -A GPU_BUSY
 
-# Worker function: each worker binds to one GPU and pulls tasks from FIFO
-start_worker() {
-  local gpu_id="$1"
-  (
-    export CUDA_VISIBLE_DEVICES="${gpu_id}"
-    echo "[RUN_ALL][GPU ${gpu_id}] Worker started"
-    while read -r script epochs; do
-      [[ -z "${script}" ]] && continue
-      echo "[RUN_ALL][GPU ${gpu_id}] Starting ${script} (EPOCHS=${epochs})"
-      RUN_FOREGROUND=1 EPOCHS="${epochs}" "./${script}"
-      echo "[RUN_ALL][GPU ${gpu_id}] Finished ${script} (EPOCHS=${epochs})"
-    done < "${FIFO}"
-    echo "[RUN_ALL][GPU ${gpu_id}] Worker exiting (no more tasks)"
-  ) &
-}
+num_tasks=${#TASKS[@]}
+task_idx=0
 
-# Start one worker per GPU
-for gpu in "${GPU_POOL[@]}"; do
-  start_worker "${gpu}"
+echo "[RUN_ALL] Total tasks: ${num_tasks}"
+
+while (( task_idx < num_tasks )); do
+  assigned=0
+  for gpu in "${GPU_POOL[@]}"; do
+    # Check if this GPU is free (no running PID or PID finished)
+    pid="${GPU_BUSY[$gpu]:-}"
+    if [[ -n "${pid}" ]]; then
+      if ! kill -0 "${pid}" 2>/dev/null; then
+        GPU_BUSY[$gpu]=""
+      fi
+    fi
+
+    if [[ -z "${GPU_BUSY[$gpu]:-}" ]]; then
+      # Assign next task to this GPU
+      task="${TASKS[$task_idx]}"
+      ((task_idx++))
+      script=${task%% *}
+      epochs=${task##* }
+      echo "[RUN_ALL][GPU ${gpu}] Starting ${script} (EPOCHS=${epochs})"
+      CUDA_VISIBLE_DEVICES="${gpu}" RUN_FOREGROUND=1 EPOCHS="${epochs}" "./${script}" &
+      GPU_BUSY[$gpu]=$!
+      assigned=1
+      # Break to let outer loop re-check from first GPU with updated state
+      break
+    fi
+  done
+
+  # If no GPU was free in this pass, wait for any child to finish
+  if (( !assigned )); then
+    # Wait for at least one child; ignore exit status
+    wait -n || true
+  fi
 done
 
-# Feed tasks into FIFO
-for t in "${TASKS[@]}"; do
-  echo "${t}" > "${FIFO}"
-done
-
-# Close writers so readers see EOF when done
-exec 3>&-
-
-wait
-rm -f "${FIFO}"
+# Wait for all remaining trainings to finish
+wait || true
 
 echo "[RUN_ALL] All POMO TSP sweeps completed."
