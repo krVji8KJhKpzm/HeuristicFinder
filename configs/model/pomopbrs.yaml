@@ -6,6 +6,13 @@ _target_: rl4co.heuristic_finder.builders.build_pomopbrs_model
 # - raw code     e.g., "def phi(state): ..."
 potential: seed:neg_remaining
 
+# PBRS shaping controls
+# Discount factor used in shaping term gamma * (Phi(s_{t+1}) - Phi(s_t))
+pbrs_gamma: 1.0
+# If true, use pure Delta-Phi shaping on intermediate steps and add the
+# original dense reward only at the terminal step.
+use_pure_shaping: false
+
 # POMO-related knobs
 # If null, use number of available start nodes (e.g., TSP: num_loc)
 num_starts: null

@@ -40,6 +40,7 @@ class POMOPBRS(POMO):
         feats: list = None,
         num_starts: int = None,
         pbrs_gamma: float = 1.0,
+        use_pure_shaping: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -58,7 +59,12 @@ class POMOPBRS(POMO):
         # a PBRS env instance for stepwise shaped rewards (same generator to align state)
         try:
             gen = getattr(env, "generator", None)
-            self._pbrs_env = DensePBRSTSPEnv(potential_fn=potential_fn, generator=gen, gamma=pbrs_gamma)
+            self._pbrs_env = DensePBRSTSPEnv(
+                potential_fn=potential_fn,
+                generator=gen,
+                gamma=pbrs_gamma,
+                pure_shaping_terminal=use_pure_shaping,
+            )
         except Exception as e:
             log.error(f"Failed to set up PBRS env: {e}")
             raise

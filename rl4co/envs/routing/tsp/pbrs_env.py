@@ -234,11 +234,17 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
         self,
         potential_fn: Callable[[TSPStateView], torch.Tensor],
         gamma: float = 1.0,
+        pure_shaping_terminal: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._potential_fn = potential_fn
         self._gamma = gamma
+        # If True, use pure potential-based shaping on intermediate steps and
+        # add the accumulated base reward only at terminal step. This keeps the
+        # endpoint reward aligned with the original objective while making
+        # intermediate rewards purely Delta-Phi.
+        self._pure_shaping_terminal = bool(pure_shaping_terminal)
         # Optional logging controls via env vars
         # PBRS_LOG_PHI=1 enables logging; modes: first|stats|all; PBRS_LOG_PHI_EVERY for throttling
         self._log_phi_enabled = os.environ.get("PBRS_LOG_PHI", "0") not in ("0", "", "false", "False")
@@ -271,6 +277,10 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
         path_length = torch.zeros((B, 1), dtype=torch.long, device=device)
         td_out.set("path_prefix", path_prefix)
         td_out.set("path_length", path_length)
+        if self._pure_shaping_terminal:
+            # Track accumulated base reward so it can be added only at terminal step
+            base_return = torch.zeros((B, 1), dtype=torch.float32, device=device)
+            td_out.set("base_return", base_return)
         return td_out
 
     def _step(self, td: TensorDict) -> TensorDict:
@@ -350,7 +360,21 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
         sv_after = self._build_state_view(td_next)
         phi_after = self._safe_phi(sv_after)
 
-        shaped = base_reward + self._gamma * (phi_after - phi_before)
+        dphi = phi_after - phi_before
+
+        if self._pure_shaping_terminal:
+            # Accumulate base reward but only add it to the shaped reward at terminal step.
+            base_return_prev = td.get("base_return", torch.zeros_like(base_reward))
+            base_return_next = base_return_prev + base_reward
+            td_next.set("base_return", base_return_next)
+
+            shaped = self._gamma * dphi
+            if done.any():
+                # Add endpoint (original) reward when trajectory finishes.
+                done_f = done.unsqueeze(-1).to(base_reward.dtype)
+                shaped = shaped + base_return_next * done_f
+        else:
+            shaped = base_reward + self._gamma * dphi
 
         td_next.set("reward", shaped)
         td_next.set("done", done)
