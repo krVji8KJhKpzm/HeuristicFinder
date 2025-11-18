@@ -9,10 +9,19 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-CUDA_GPUS=${CUDA_GPUS:-0}
-export CUDA_VISIBLE_DEVICES="$CUDA_GPUS"
-IFS=',' read -r -a GPU_ARR <<< "$CUDA_GPUS"
-NUM_DEVICES=${#GPU_ARR[@]}
+# Decide which single GPU to use:
+# Priority: CUDA_VISIBLE_DEVICES (if already set) > CUDA_DEVICE > first id in CUDA_GPUS > 0
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  if [[ -n "${CUDA_DEVICE:-}" ]]; then
+    export CUDA_VISIBLE_DEVICES="${CUDA_DEVICE}"
+  elif [[ -n "${CUDA_GPUS:-}" ]]; then
+    IFS=',' read -r first_gpu _ <<< "${CUDA_GPUS}"
+    export CUDA_VISIBLE_DEVICES="${first_gpu}"
+  else
+    export CUDA_VISIBLE_DEVICES="0"
+  fi
+fi
+NUM_DEVICES=1
 
 EPOCHS=${EPOCHS:-100}
 BATCH=${BATCH:-64}
