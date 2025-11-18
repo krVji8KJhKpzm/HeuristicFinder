@@ -75,6 +75,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--archive-top-k", type=int, default=8, help="Top-K to keep in elite archive")
     p.add_argument("--elite-parent-k", type=int, default=2, help="Inject K elites into parent pool")
     p.add_argument("--elite-replace-worst", type=int, default=1, help="Replace worst K with elites after merge")
+    p.add_argument(
+        "--log-evo-details",
+        action="store_true",
+        help="Print detailed evolution statistics (offspring counts, dedup effects, etc.)",
+    )
 
     # Level 1 / Level 2 multi-stage config
     p.add_argument("--offline-traj-path", type=str, default="data/tsp20_offline_trajs.pt")
@@ -188,6 +193,7 @@ def main():
         refine_epochs=int(args.refine_epochs),
         use_cheap_level=not bool(args.no_cheap_level),
         use_level2_rl=not bool(args.no_level2_rl),
+        log_evo_details=bool(args.log_evo_details),
     )
     results = evolution_search(cfg)
 

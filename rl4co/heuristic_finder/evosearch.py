@@ -124,6 +124,8 @@ class EvoConfig:
     # Diagnostics collection for reflection
     collect_stats: bool = True
     stats_batch_size: int = 64
+    # Logging / diagnostics
+    log_evo_details: bool = False
 
 
 def compile_candidates(codes: List[str]) -> List[PotentialSpec]:
@@ -278,6 +280,7 @@ def _propose_offspring_for_operator(
     ps = cfg.pop_size if cfg.pop_size is not None else cfg.population_size
     N = int(ps)
     out: List[Candidate] = []
+    debug = getattr(cfg, "log_evo_details", False)
 
     # Determine streaming setting from environment variables
     stream = False
@@ -291,6 +294,7 @@ def _propose_offspring_for_operator(
 
     for _ in range(N):
         try:
+            codes: List[str] = []
             if operator in ("e1", "e2"):
                 pars = _tournament_select(scored, m=cfg.m_parents, k=cfg.tournament_k)
                 pack = _parents_pack(pars)
@@ -311,6 +315,9 @@ def _propose_offspring_for_operator(
                 # unknown operator: skip
                 continue
 
+            if debug and not codes:
+                print(f"[Evo] operator={operator}: LLM returned 0 code samples for an offspring.", flush=True)
+
             # Optional memetic light repair on raw generation
             if cfg.memetic_repair_prob > 0.0 and random.random() < float(cfg.memetic_repair_prob):
                 try:
@@ -320,15 +327,24 @@ def _propose_offspring_for_operator(
                         repaired.append(rc[0] if rc else c)
                     codes = repaired
                 except Exception:
+                    if debug:
+                        print(f"[Evo] operator={operator}: memetic repair failed; keeping original codes.", flush=True)
                     pass
 
             specs = compile_candidates(codes)
+            if debug and codes and not specs:
+                print(
+                    f"[Evo] operator={operator}: compile_candidates dropped all {len(codes)} code sample(s).",
+                    flush=True,
+                )
             for sp in specs:
                 g = _mutate_gamma(_init_gamma(cfg), cfg) if cfg.mutate_gamma else _init_gamma(cfg)
                 alg = extract_algorithm(sp.code) if cfg.enable_thought else None
                 ch = compute_code_hash(sp.code)
                 out.append(Candidate(spec=sp, gamma=g, algorithm=alg, code_hash=ch))
-        except Exception:
+        except Exception as exc:
+            if debug:
+                print(f"[Evo] operator={operator}: exception during offspring generation: {exc}", flush=True)
             continue
 
     return out
@@ -655,6 +671,7 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
     - Elite archive maintained across generations with optional parent injection
     """
     # Resolve default operators/weights if not provided
+    debug = getattr(cfg, "log_evo_details", False)
     ops = cfg.operators if cfg.operators is not None else ["e1", "e2", "m1", "m2", "m3"]
     op_weights = cfg.operator_weights if cfg.operator_weights is not None else [1.0 for _ in ops]
     if len(op_weights) != len(ops):
@@ -679,6 +696,7 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
     for pop_idx in range(n_pops):
         init_cands: List[Candidate] = []
         seen_pop: Set[str] = set()
+        seeds_used = 0
         while seed_pool and len(init_cands) < pop_size:
             cand = seed_pool.pop(0)
             h = cand.code_hash or compute_code_hash(cand.spec.code)
@@ -690,6 +708,7 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
                 seen_pop.add(h)
                 seen_global.add(h)
             init_cands.append(cand)
+            seeds_used += 1
         if len(init_cands) < pop_size:
             need_init = pop_size - len(init_cands)
             total_init = need_init * max(1, int(cfg.initial_copies))
@@ -709,6 +728,7 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
             if not specs:
                 print(init_codes)
                 raise RuntimeError("LLM produced no valid initial candidates. Check provider, API key, and model.")
+            new_llm_specs = 0
             for s in specs:
                 alg = extract_algorithm(s.code) if cfg.enable_thought else None
                 h = compute_code_hash(s.code)
@@ -720,6 +740,13 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
                 seen_global.add(h)
                 init_cands.append(
                     Candidate(spec=s, gamma=_init_gamma(cfg), algorithm=alg, code_hash=h)
+                )
+                new_llm_specs += 1
+            if debug:
+                print(
+                    f"[Evo] Init pop {pop_idx}: seeds_used={seeds_used}, new_from_LLM={new_llm_specs}, "
+                    f"total_init_cands={len(init_cands)}",
+                    flush=True,
                 )
         # Evaluate and keep top-N (fitness is 1 / MSE over worst-case multi-scale MSE)
         scored_init = _evaluate_population(init_cands, cfg)
@@ -748,11 +775,22 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
                 parent_pool = scored
 
             for op, pw in zip(ops, op_weights):
-                if random.random() > float(pw):
+                r = random.random()
+                if r > float(pw):
+                    if debug:
+                        print(
+                            f"[Evo] Gen {gen_idx}, pop {pop_idx}, op={op}: skipped (r={r:.3f} > p={float(pw):.3f}).",
+                            flush=True,
+                        )
                     continue
                 # Generate N offspring for this operator using current population parent_pool
                 offspring = _propose_offspring_for_operator(parent_pool, cfg, op)
                 if not offspring:
+                    if debug:
+                        print(
+                            f"[Evo] Gen {gen_idx}, pop {pop_idx}, op={op}: no offspring generated.",
+                            flush=True,
+                        )
                     continue
                 # Dedup offspring
                 filtered: List[Candidate] = []
@@ -767,9 +805,22 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
                     seen_global.add(h)
                     filtered.append(c)
                 if not filtered:
+                    if debug:
+                        print(
+                            f"[Evo] Gen {gen_idx}, pop {pop_idx}, op={op}: "
+                            f"all {len(offspring)} offspring removed by dedup.",
+                            flush=True,
+                        )
                     continue
 
                 off_results = _evaluate_population(filtered, cfg)
+                if debug:
+                    print(
+                        f"[Evo] Gen {gen_idx}, pop {pop_idx}, op={op}: "
+                        f"offspring={len(offspring)}, kept_after_dedup={len(filtered)}, "
+                        f"evaluated={len(off_results)}",
+                        flush=True,
+                    )
                 # Merge and keep top-N
                 scored.extend(off_results)
                 scored.sort(key=lambda x: x[1], reverse=True)
@@ -787,6 +838,13 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
                 archive.update(scored)
                 if cfg.dump_dir:
                     _dump_candidates(cfg.dump_dir, scored, gen_idx=gen_idx + 1)
+        if debug:
+            # Simple per-generation summary of best fitness per population
+            best_scores = [s[0][1] if s else float("-inf") for s in populations]
+            print(
+                f"[Evo] End gen {gen_idx}: best fitness per pop = {best_scores}",
+                flush=True,
+            )
 
     # Collect and return global top
     all_scored: List[Tuple[Candidate, float]] = []
