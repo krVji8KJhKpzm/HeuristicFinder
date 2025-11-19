@@ -1,0 +1,2403 @@
+LLM API Provider: kimi
+KIMI_API_KEY: sk-DYrzQpdCNejFs2C73hl17zbeYHSZiWfMn8AV81GjOzMgyEkB
+Requesting to LLM...
+Request cost time: 14.008448839187622 (s)
+Requesting to LLM...
+Request cost time: 10.09567379951477 (s)
+Requesting to LLM...
+Request cost time: 13.153602600097656 (s)
+Requesting to LLM...
+Request cost time: 17.216087102890015 (s)
+Requesting to LLM...
+Request cost time: 11.412264347076416 (s)
+Requesting to LLM...
+Request cost time: 10.758120775222778 (s)
+Requesting to LLM...
+Request cost time: 12.559362411499023 (s)
+Requesting to LLM...
+Request cost time: 12.069621562957764 (s)
+Requesting to LLM...
+Request cost time: 10.907162189483643 (s)
+Requesting to LLM...
+Request cost time: 15.767398595809937 (s)
+Requesting to LLM...
+Request cost time: 12.36709213256836 (s)
+Requesting to LLM...
+Request cost time: 14.211279392242432 (s)
+Requesting to LLM...
+Request cost time: 14.533496141433716 (s)
+Requesting to LLM...
+Request cost time: 15.15166425704956 (s)
+Requesting to LLM...
+Request cost time: 12.015604734420776 (s)
+Requesting to LLM...
+Request cost time: 11.621208906173706 (s)
+Requesting to LLM...
+Request cost time: 14.7775239944458 (s)
+Requesting to LLM...
+Request cost time: 19.114595890045166 (s)
+Requesting to LLM...
+Request cost time: 13.943943500518799 (s)
+Requesting to LLM...
+Request cost time: 15.646335124969482 (s)
+/data1/gushengda/rl4co/rl4co/heuristic_finder/offline_data_tsp20.py:428: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  return torch.load(path, map_location="cpu")
+[HeuristicFinder] Runtime error in phi(state): name '__import__' is not defined 
+ source code follows:
+================================================================================
+def phi(state):
+    """
+    Estimates the future tour length (cost-to-go) for a TSP state.
+
+    Args:
+        state: A TSPStateView object with helper methods.
+
+    Returns:
+        A torch tensor of shape [B, 1] representing the estimated future cost.
+    """
+    # {The algorithm estimates the future tour length by summing two components: the expected cost to the next node (average distance from the current node to all unvisited nodes) and the expected cost of the remaining sub-tour (average pairwise distance among unvisited nodes scaled by the number of remaining nodes).}
+    torch = __import__('torch')
+
+    # Get batch size and number of nodes
+    B, N, _ = state.all_node_coords().shape
+
+    # Masks for visited and unvisited nodes
+    unvisited_mask = state.unvisited_mask()  # [B, N]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True).float()  # [B, 1]
+
+    # Handle terminal states where num_unvisited is 0
+    is_terminal = (num_unvisited <= 1)
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=unvisited_mask.device)
+
+    # Get distance matrix
+    dist_matrix = state.distance_matrix()  # [B, N, N]
+
+    # --- Component 1: Cost from current node to the next unvisited node ---
+    current_node_idx = state.current_node_index().view(B, 1, 1).expand(-1, 1, N) # [B, 1, N]
+    # Distances from current node to all other nodes
+    dists_from_current = torch.gather(dist_matrix, 1, current_node_idx).squeeze(1) # [B, N]
+
+    # Mask out distances to visited nodes
+    dists_from_current_to_unvisited = dists_from_current * unvisited_mask
+    # Average distance from current to unvisited nodes (cost of next step)
+    # Use a small epsilon to avoid division by zero if num_unvisited is 0
+    avg_dist_to_next = dists_from_current_to_unvisited.sum(dim=1, keepdim=True) / torch.clamp(num_unvisited, min=1) # [B, 1]
+
+    # --- Component 2: Cost of the remaining sub-tour among unvisited nodes ---
+    # Create a mask for pairs of unvisited nodes
+    unvisited_mask_2d = unvisited_mask.unsqueeze(2) & unvisited_mask.unsqueeze(1) # [B, N, N]
+    # Mask the distance matrix to only include distances between unvisited nodes
+    unvisited_dists = dist_matrix * unvisited_mask_2d
+
+    # Sum of distances between all pairs of unvisited nodes
+    sum_unvisited_dists = unvisited_dists.sum(dim=(1, 2)) # [B]
+    # Number of pairs of unvisited nodes (N_unvisited * (N_unvisited - 1))
+    num_pairs = num_unvisited * (num_unvisited - 1) # [B, 1]
+
+    # Average distance between any two unvisited nodes
+    avg_pairwise_dist = sum_unvisited_dists.view(B, 1) / torch.clamp(num_pairs, min=1) # [B, 1]
+
+    # Estimate remaining tour length: (N_unvisited - 1) edges * avg distance per edge
+    # We use N_unvisited as a simple heuristic scaling factor.
+    remaining_tour_cost = avg_pairwise_dist * (num_unvisited - 1) # [B, 1]
+
+    # Total estimated future cost
+    value = avg_dist_to_next + remaining_tour_cost # [B, 1]
+
+    # Set value to 0 for terminal states
+    # This ensures Phi(s_T) = 0, which is desirable for potential-based shaping.
+    value = value * (~is_terminal).float()
+
+    return value
+================================================================================
+Repairing code via llm...
+Requesting to LLM...
+Request cost time: 18.139917373657227 (s)
+[HeuristicFinder] Runtime error in phi(state): name '__import__' is not defined 
+ source code follows:
+================================================================================
+def phi(state):
+    """
+    Estimates the future tour length (cost-to-go) for a TSP state.
+
+    Args:
+        state: A TSPStateView object with helper methods.
+
+    Returns:
+        A torch tensor of shape [B, 1] representing the estimated future cost.
+    """
+    torch = __import__('torch')
+
+    # Get batch size from a reliable source
+    B = state.current_node_index().shape[0]
+    dev = state.all_node_coords().device
+
+    # Masks for visited and unvisited nodes
+    unvisited_mask = state.unvisited_mask()  # [B, N]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True).float()  # [B, 1]
+
+    # Handle terminal states where num_unvisited <= 1 (no more edges to form)
+    is_terminal = (num_unvisited <= 1.0)
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=dev)
+
+    # Get distance matrix
+    dist_matrix = state.distance_matrix()  # [B, N, N]
+
+    # --- Component 1: Expected cost from current node to the next unvisited node ---
+    current_node_idx = state.current_node_index()  # [B]
+    # Gather distances from the current node: shape [B, N]
+    dists_from_current = torch.gather(dist_matrix, 1, current_node_idx.view(B, 1, 1).expand(-1, 1, dist_matrix.shape[-1])).squeeze(1)
+
+    # Sum of distances from current to all unvisited nodes
+    sum_dists_to_unvisited = (dists_from_current * unvisited_mask).sum(dim=1, keepdim=True) # [B, 1]
+    # Average distance to the next node
+    avg_dist_to_next = sum_dists_to_unvisited / num_unvisited # [B, 1]
+
+    # --- Component 2: Expected cost of the remaining sub-tour among unvisited nodes ---
+    # Create a mask for pairs of unvisited nodes
+    unvisited_mask_2d = unvisited_mask.unsqueeze(2) * unvisited_mask.unsqueeze(1)  # [B, N, N]
+    # Mask the distance matrix to only include distances between unvisited nodes
+    unvisited_dists = dist_matrix * unvisited_mask_2d
+
+    # Sum of distances between all pairs of unvisited nodes (divide by 2 for unique pairs)
+    sum_unvisited_pairwise_dists = unvisited_dists.sum(dim=(1, 2), keepdim=True) / 2.0  # [B, 1]
+    # Number of unique pairs of unvisited nodes: n * (n-1) / 2
+    num_unvisited_pairs = num_unvisited * (num_unvisited - 1.0) / 2.0  # [B, 1]
+
+    # Average distance between any two unvisited nodes
+    avg_pairwise_dist = sum_unvisited_pairwise_dists / torch.clamp(num_unvisited_pairs, min=1e-6) # [B, 1]
+
+    # Estimate remaining tour length: (num_unvisited - 1) edges needed to connect the subgraph
+    remaining_tour_cost = avg_pairwise_dist * (num_unvisited - 1.0) # [B, 1]
+
+    # Total estimated future cost, ensuring terminal states have zero value
+    value = (avg_dist_to_next + remaining_tour_cost) * (~is_terminal).float() # [B, 1]
+
+    # Final cleanup for numerical stability and magnitude control
+    value = torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
+    value = torch.clamp(value, min=0.0, max=1e4) # Clamp large values
+
+    return value
+================================================================================
+Repairing code via llm...
+Requesting to LLM...
+Request cost time: 13.589919328689575 (s)
+[HeuristicFinder] Runtime error in phi(state): name '__import__' is not defined 
+ source code follows:
+================================================================================
+def phi(state):
+    """
+    Estimates the future tour length (cost-to-go) for a TSP state.
+
+    Args:
+        state: A TSPStateView object with helper methods.
+
+    Returns:
+        A torch tensor of shape [B, 1] representing the estimated future cost.
+    """
+    torch = __import__('torch')
+
+    # Get batch size and device from state properties
+    B = state.current_node_index().shape[0]
+    dev = state.all_node_coords().device
+
+    # Masks for visited and unvisited nodes
+    unvisited_mask = state.unvisited_mask()  # [B, N]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True).float()  # [B, 1]
+
+    # Handle terminal states where num_unvisited <= 1 (no more edges to form)
+    is_terminal = (num_unvisited <= 1.0)
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=dev)
+
+    # Get distance matrix
+    dist_matrix = state.distance_matrix()  # [B, N, N]
+
+    # --- Component 1: Cost from current node to the closest unvisited node ---
+    current_node_idx = state.current_node_index()  # [B]
+    # Gather distances from the current node: shape [B, N]
+    dists_from_current = torch.gather(dist_matrix, 1, current_node_idx.view(B, 1, 1).expand(-1, 1, dist_matrix.shape[-1])).squeeze(1)
+    # Set distances to visited nodes to infinity to find the minimum to an unvisited node
+    dists_from_current.masked_fill_(~unvisited_mask, float('inf'))
+    cost_to_next = torch.min(dists_from_current, dim=1, keepdim=True).values # [B, 1]
+    # If no unvisited nodes, min returns inf, so handle that case
+    cost_to_next[torch.isinf(cost_to_next)] = 0.0
+
+    # --- Component 2: Estimated cost of the remaining sub-tour among unvisited nodes ---
+    # Create a mask for pairs of unvisited nodes
+    unvisited_mask_2d = unvisited_mask.unsqueeze(2) & unvisited_mask.unsqueeze(1)  # [B, N, N]
+    # Mask the distance matrix to only include distances between unvisited nodes
+    # Set other distances to infinity to find the minimums correctly
+    subtour_dists = dist_matrix.clone()
+    subtour_dists.masked_fill_(~unvisited_mask_2d, float('inf'))
+    # Set diagonal to infinity to exclude self-loops
+    subtour_dists.diagonal(dim1=-2, dim2=-1).fill_(float('inf'))
+
+    # Find the nearest neighbor distance for each unvisited node within the unvisited subgraph
+    min_dists, _ = torch.min(subtour_dists, dim=2) # [B, N]
+    # Sum of nearest neighbor distances for all unvisited nodes
+    # (min_dists for visited nodes will be inf, but mask handles this)
+    sum_of_min_dists = (min_dists * unvisited_mask).sum(dim=1, keepdim=True) # [B, 1]
+
+    # Average nearest neighbor distance within the unvisited subgraph
+    avg_nn_dist = sum_of_min_dists / torch.clamp(num_unvisited, min=1.0) # [B, 1]
+
+    # Estimate remaining tour length: (num_unvisited) edges needed to connect the subgraph and return
+    # A common heuristic is to scale the avg NN distance by the number of remaining nodes
+    remaining_tour_cost = avg_nn_dist * torch.clamp(num_unvisited, min=0.0) # [B, 1]
+
+    # Total estimated future cost, ensuring terminal states have zero value
+    value = (cost_to_next + remaining_tour_cost) * (~is_terminal).float() # [B, 1]
+
+    # Final cleanup for numerical stability and magnitude control
+    value = torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
+    value = torch.clamp(value, min=0.0) # Clamp to be non-negative
+
+    return value
+================================================================================
+Repairing code via llm...
+Requesting to LLM...
+Request cost time: 14.447650671005249 (s)
+[HeuristicFinder] Runtime error in phi(state): name '__import__' is not defined 
+ source code follows:
+================================================================================
+def phi(state):
+    """
+    Estimates the future tour length (cost-to-go) for a TSP state using an MST-based heuristic.
+
+    Args:
+        state: A TSPStateView object with helper methods.
+
+    Returns:
+        A torch tensor of shape [B, 1] representing the estimated future cost.
+    """
+    torch = __import__('torch')
+
+    # Get batch size, device, and problem size from state properties
+    B, N = state.all_node_coords().shape[:2]
+    dev = state.all_node_coords().device
+
+    # Masks and counts for unvisited nodes
+    unvisited_mask = state.unvisited_mask()  # [B, N]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True)  # [B, 1]
+
+    # Handle terminal states (<= 1 unvisited node means no more edges to form)
+    is_terminal = (num_unvisited <= 1)
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=dev)
+
+    # --- Component 1: Cost from current node to the closest unvisited node ---
+    dist_matrix = state.distance_matrix()  # [B, N, N]
+    current_node_idx = state.current_node_index().view(B, 1, 1).expand(-1, 1, N) # [B, 1, N]
+    dists_from_current = torch.gather(dist_matrix, 1, current_node_idx).squeeze(1) # [B, N]
+    dists_from_current.masked_fill_(~unvisited_mask, float('inf'))
+    cost_to_next = torch.min(dists_from_current, dim=1, keepdim=True).values # [B, 1]
+
+    # --- Component 2: MST cost for the remaining unvisited subgraph ---
+    # Create a subgraph of unvisited nodes including the current node
+    subgraph_mask = unvisited_mask | torch.zeros_like(unvisited_mask).scatter_(1, state.current_node_index().unsqueeze(1), 1) # [B, N]
+
+    # Use Prim's algorithm to approximate MST cost on the subgraph
+    # Start Prim's from an arbitrary unvisited node (or the current node)
+    # Find the first unvisited node index for each batch item
+    first_unvisited_idx = torch.where(subgraph_mask, torch.arange(N, device=dev), N + 1).min(dim=1).values.view(B, 1) # [B, 1]
+
+    # Initialize MST data structures
+    in_mst = torch.zeros_like(subgraph_mask) # [B, N]
+    in_mst.scatter_(1, first_unvisited_idx, True)
+    min_edge_costs = torch.full((B, N), float('inf'), device=dev) # [B, N]
+
+    # Mask distances to only consider edges within the subgraph
+    subgraph_dists = dist_matrix.clone()
+    subgraph_mask_2d = subgraph_mask.unsqueeze(2) & subgraph_mask.unsqueeze(1) # [B, N, N]
+    subgraph_dists.masked_fill_(~subgraph_mask_2d, float('inf'))
+
+    mst_cost = torch.zeros(B, 1, device=dev)
+
+    # Iteratively build the MST for num_unvisited - 1 steps
+    # We can do this in a loop, which is fine for small N, or parallelize
+    for _ in range(N - 1): # Max possible edges in MST is N-1
+        # Update min_edge_costs for nodes not in MST based on the newly added node
+        last_added_idx = first_unvisited_idx.view(B, 1, 1).expand(-1, 1, N) # [B, 1, N]
+        new_dists = torch.gather(subgraph_dists, 1, last_added_idx).squeeze(1) # [B, N]
+        min_edge_costs = torch.min(min_edge_costs, new_dists)
+        min_edge_costs.masked_fill_(in_mst, float('inf')) # Exclude nodes already in MST
+
+        # Find the minimum cost edge to a node not yet in the MST
+        min_vals, next_node_idx = torch.min(min_edge_costs, dim=1, keepdim=True) # [B, 1]
+
+        # Break if no more valid edges can be added (all unvisited nodes are connected)
+        if torch.isinf(min_vals).all():
+            break
+
+        min_vals.masked_fill_(torch.isinf(min_vals), 0) # Handle disconnected components
+        mst_cost += min_vals
+
+        # Add the new node to the MST
+        in_mst.scatter_(1, next_node_idx, True)
+        first_unvisited_idx = next_node_idx
+
+    # Total estimated future cost
+    value = cost_to_next + mst_cost
+
+    # Final cleanup: set terminal state values to 0 and handle potential NaNs/Infs
+    value.masked_fill_(is_terminal, 0.0)
+    value = torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
+    value = torch.clamp(value, min=0.0)
+
+    return value
+================================================================================
+Repairing code via llm...
+Requesting to LLM...
+Request cost time: 12.130140781402588 (s)
+[HeuristicFinder] Runtime error in phi(state): name '__import__' is not defined 
+ source code follows:
+================================================================================
+def phi(state):
+    """
+    Estimates the future tour length (cost-to-go) for a TSP state using a parallelized MST-based heuristic.
+
+    Args:
+        state: A TSPStateView object with helper methods.
+
+    Returns:
+        A torch tensor of shape [B, 1] representing the estimated future cost.
+    """
+    torch = __import__('torch')
+
+    # Get batch size, device, and problem size from state properties
+    coords = state.all_node_coords()
+    B, N, _ = coords.shape
+    dev = coords.device
+
+    # Masks and counts for unvisited nodes
+    unvisited_mask = state.unvisited_mask()  # [B, N]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True)  # [B, 1]
+
+    # Handle terminal states (<= 1 unvisited node means no more edges to form)
+    is_terminal = (num_unvisited <= 1)
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=dev)
+
+    # --- Component 1: Cost from current node to the closest unvisited node ---
+    dist_matrix = state.distance_matrix()  # [B, N, N]
+    current_node_idx = state.current_node_index().view(B, 1, 1).expand(-1, 1, N) # [B, 1, N]
+    dists_from_current = torch.gather(dist_matrix, 1, current_node_idx).squeeze(1) # [B, N]
+    dists_from_current.masked_fill_(~unvisited_mask, float('inf'))
+    cost_to_next = torch.min(dists_from_current, dim=1, keepdim=True).values # [B, 1]
+
+    # --- Component 2: MST cost for the remaining unvisited subgraph ---
+    # Create a subgraph of only unvisited nodes
+    subgraph_dists = dist_matrix.clone()
+    unvisited_mask_2d = unvisited_mask.unsqueeze(2) & unvisited_mask.unsqueeze(1) # [B, N, N]
+    subgraph_dists.masked_fill_(~unvisited_mask_2d, float('inf'))
+
+    # Find the first unvisited node index for each batch item to start Prim's
+    # Use a large value for visited nodes to ensure min finds an unvisited one
+    arange_n = torch.arange(N, device=dev).expand(B, -1)
+    first_unvisited_idx = torch.where(unvisited_mask, arange_n, N + 1).min(dim=1, keepdim=True).values # [B, 1]
+
+    # Initialize MST data structures for parallel Prim's algorithm
+    in_mst = torch.zeros_like(unvisited_mask).scatter_(1, first_unvisited_idx, True) # [B, N]
+    min_edge_costs = torch.full((B, N), float('inf'), device=dev) # [B, N]
+    mst_cost = torch.zeros(B, 1, device=dev)
+
+    # Parallelized Prim's algorithm using a for-loop over a fixed number of steps (N-1)
+    # This avoids data-dependent loops and is more friendly for compilation/acceleration.
+    for _ in range(N - 1):
+        # Update min_edge_costs for nodes not in MST based on the newly added node
+        new_dists = torch.gather(subgraph_dists, 1, first_unvisited_idx.unsqueeze(2)).squeeze(1) # [B, N]
+        min_edge_costs = torch.min(min_edge_costs, new_dists)
+        min_edge_costs.masked_fill_(in_mst, float('inf')) # Exclude nodes already in MST
+
+        # Find the minimum cost edge to a node not yet in the MST
+        min_vals, next_node_idx = torch.min(min_edge_costs, dim=1, keepdim=True) # [B, 1]
+
+        # Break condition for this iteration: if no more valid edges can be added
+        is_done = torch.isinf(min_vals)
+        if is_done.all():
+            break
+
+        # Accumulate cost, replacing inf with 0 for finished graphs
+        mst_cost += min_vals.masked_fill(is_done, 0)
+
+        # Add the new node to the MST if it's a valid addition
+        in_mst.scatter_(1, next_node_idx, True)
+        first_unvisited_idx = next_node_idx
+
+    # Total estimated future cost
+    value = cost_to_next + mst_cost
+
+    # Final cleanup: set terminal state values to 0 and handle potential NaNs/Infs
+    value.masked_fill_(is_terminal, 0.0)
+    value = torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
+    value = torch.clamp(value, min=0.0)
+
+    return value
+================================================================================
+Repairing code via llm...
+Requesting to LLM...
+Request cost time: 13.276013612747192 (s)
+[HeuristicFinder] Runtime error in phi(state): name '__import__' is not defined 
+ source code follows:
+================================================================================
+def phi(state):
+    """
+    Estimates the future tour length (cost-to-go) for a TSP state using a nearest-neighbor heuristic.
+
+    Args:
+        state: A TSPStateView object with helper methods.
+
+    Returns:
+        A torch tensor of shape [B, 1] representing the estimated future cost.
+    """
+    torch = __import__('torch')
+
+    # Get batch size, device, and problem size from state properties
+    coords = state.all_node_coords()
+    B, N, _ = coords.shape
+    dev = coords.device
+
+    # Masks and counts for unvisited nodes
+    unvisited_mask = state.unvisited_mask()  # [B, N]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True)  # [B, 1]
+
+    # Handle terminal states (<= 1 unvisited node means no more edges to form)
+    is_terminal = (num_unvisited <= 1)
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=dev)
+
+    # --- Component 1: Cost from current node to the closest unvisited node ---
+    dist_matrix = state.distance_matrix()  # [B, N, N]
+    current_node_idx = state.current_node_index().view(B, 1, 1).expand(-1, 1, N) # [B, 1, N]
+    dists_from_current = torch.gather(dist_matrix, 1, current_node_idx).squeeze(1) # [B, N]
+    dists_from_current.masked_fill_(~unvisited_mask, float('inf'))
+    cost_to_next = torch.min(dists_from_current, dim=1, keepdim=True).values # [B, 1]
+
+    # --- Component 2: Sum of nearest neighbor distances for all unvisited nodes ---
+    # Create a subgraph of only unvisited nodes by masking rows and columns
+    subgraph_dists = dist_matrix.clone()
+    subgraph_dists.masked_fill_(~unvisited_mask.unsqueeze(1), float('inf')) # Mask rows (sources)
+    subgraph_dists.masked_fill_(~unvisited_mask.unsqueeze(2), float('inf')) # Mask columns (destinations)
+
+    # Set diagonal to infinity to prevent a node from being its own nearest neighbor
+    subgraph_dists.diagonal(dim1=-2, dim2=-1).fill_(float('inf'))
+
+    # Find the minimum distance from each unvisited node to any *other* unvisited node
+    # The result is [B, N], but we only care about the values for unvisited nodes.
+    min_dists_per_node = torch.min(subgraph_dists, dim=2).values # [B, N]
+
+    # Sum these minimum distances, effectively summing over only the unvisited nodes
+    # because distances from visited nodes are inf.
+    heuristic_cost = min_dists_per_node.sum(dim=1, keepdim=True) # [B, 1]
+
+    # Total estimated future cost
+    value = cost_to_next + heuristic_cost
+
+    # Final cleanup: set terminal state values to 0 and handle potential NaNs/Infs
+    value.masked_fill_(is_terminal, 0.0)
+    value = torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
+    value = torch.clamp(value, min=0.0) # Ensure non-negativity
+
+    # Ensure the output shape is exactly [B, 1]
+    return value.view(B, 1)
+================================================================================
+Repairing code via llm...
+Requesting to LLM...
+Request cost time: 13.458343267440796 (s)
+[HeuristicFinder] Runtime error in phi(state): name '__import__' is not defined 
+ source code follows:
+================================================================================
+def phi(state):
+    """
+    Estimates the future tour length (cost-to-go) for a TSP state using a nearest-neighbor heuristic.
+
+    Args:
+        state: A TSPStateView object with helper methods.
+
+    Returns:
+        A torch tensor of shape [B, 1] representing the estimated future cost.
+    """
+    torch = __import__('torch')
+
+    # Get batch size, device, and problem size from state properties
+    coords = state.all_node_coords()
+    B, N, _ = coords.shape
+    dev = coords.device
+
+    # Masks and counts for unvisited nodes
+    unvisited_mask = state.unvisited_mask()  # [B, N]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True)  # [B, 1]
+
+    # Handle terminal states (<= 1 unvisited node means no more edges to form)
+    is_terminal = (num_unvisited <= 1)
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=dev)
+
+    # --- Component 1: Cost from current node to the closest unvisited node ---
+    dist_matrix = state.distance_matrix()  # [B, N, N]
+    current_node_idx = state.current_node_index().view(B, 1, 1).expand(-1, 1, N) # [B, 1, N]
+    dists_from_current = torch.gather(dist_matrix, 1, current_node_idx).squeeze(1) # [B, N]
+    # Mask out already visited nodes to find the closest *unvisited* one
+    dists_from_current.masked_fill_(~unvisited_mask, float('inf'))
+    cost_to_next = torch.min(dists_from_current, dim=1, keepdim=True).values # [B, 1]
+
+    # --- Component 2: Average of nearest neighbor distances for all unvisited nodes ---
+    # Create a subgraph of only unvisited nodes by masking rows and columns
+    subgraph_dists = dist_matrix.clone()
+    # Mask rows (sources) and columns (destinations) that are not unvisited
+    unvisited_mask_expanded = unvisited_mask.unsqueeze(1) & unvisited_mask.unsqueeze(2) # [B, N, N]
+    subgraph_dists.masked_fill_(~unvisited_mask_expanded, float('inf'))
+    # Set diagonal to infinity to prevent a node from being its own nearest neighbor
+    subgraph_dists.diagonal(dim1=-2, dim2=-1).fill_(float('inf'))
+
+    # Find the minimum distance from each unvisited node to any *other* unvisited node
+    min_dists_unvisited = torch.min(subgraph_dists, dim=2).values # [B, N]
+    # Mask out the inf values from visited nodes before summing
+    min_dists_unvisited.masked_fill_(~unvisited_mask, 0.0)
+
+    # Sum of nearest neighbor distances for the remaining tour
+    sum_nn_dists = min_dists_unvisited.sum(dim=1, keepdim=True) # [B, 1]
+
+    # Normalize by the number of remaining edges to form (num_unvisited - 1)
+    # and multiply by an average distance to scale the sum. This is a heuristic reduction.
+    # The average distance is computed across all initial edges for simplicity and stability.
+    mean_dist = torch.mean(dist_matrix[dist_matrix > 0])
+    # Heuristic cost is the sum of nn distances scaled by a factor related to graph density
+    heuristic_cost = sum_nn_dists * (mean_dist / (num_unvisited.float() + 1e-9))
+
+    # Total estimated future cost
+    value = cost_to_next + heuristic_cost
+
+    # Final cleanup: set terminal state values to 0 and handle potential NaNs/Infs
+    value.masked_fill_(is_terminal, 0.0)
+    value = torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
+    # Clamp to prevent extreme values, using a scale relative to problem size
+    value = torch.clamp(value, min=0.0, max=N * mean_dist * 2.0)
+
+    # Ensure the output shape is exactly [B, 1]
+    return value.view(B, 1)
+================================================================================
+Repairing code via llm...
+Requesting to LLM...
+Request cost time: 16.20372462272644 (s)
+[HeuristicFinder] Runtime error in phi(state) during mse_phi_vs_value: name '__import__' is not defined
+ source code follows:
+================================================================================
+# THOUGHT: {auto}
+def phi(state):
+    """
+    Estimates the future tour length (cost-to-go) for a TSP state.
+
+    Args:
+        state: A TSPStateView object with helper methods.
+
+    Returns:
+        A torch tensor of shape [B, 1] representing the estimated future cost.
+    """
+    torch = __import__('torch')
+
+    # Get batch size from a reliable source
+    B = state.current_node_index().shape[0]
+    dev = state.all_node_coords().device
+
+    # Masks for visited and unvisited nodes
+    unvisited_mask = state.unvisited_mask()  # [B, N]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True).float()  # [B, 1]
+
+    # Handle terminal states where num_unvisited <= 1 (no more edges to form)
+    is_terminal = (num_unvisited <= 1.0)
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=dev)
+
+    # Get distance matrix
+    dist_matrix = state.distance_matrix()  # [B, N, N]
+
+    # --- Component 1: Expected cost from current node to the next unvisited node ---
+    current_node_idx = state.current_node_index()  # [B]
+    # Gather distances from the current node: shape [B, N]
+    dists_from_current = torch.gather(dist_matrix, 1, current_node_idx.view(B, 1, 1).expand(-1, 1, dist_matrix.shape[-1])).squeeze(1)
+
+    # Sum of distances from current to all unvisited nodes
+    sum_dists_to_unvisited = (dists_from_current * unvisited_mask).sum(dim=1, keepdim=True) # [B, 1]
+    # Average distance to the next node
+    avg_dist_to_next = sum_dists_to_unvisited / num_unvisited # [B, 1]
+
+    # --- Component 2: Expected cost of the remaining sub-tour among unvisited nodes ---
+    # Create a mask for pairs of unvisited nodes
+    unvisited_mask_2d = unvisited_mask.unsqueeze(2) * unvisited_mask.unsqueeze(1)  # [B, N, N]
+    # Mask the distance matrix to only include distances between unvisited nodes
+    unvisited_dists = dist_matrix * unvisited_mask_2d
+
+    # Sum of distances between all pairs of unvisited nodes (divide by 2 for unique pairs)
+    sum_unvisited_pairwise_dists = unvisited_dists.sum(dim=(1, 2), keepdim=True) / 2.0  # [B, 1]
+    # Number of unique pairs of unvisited nodes: n * (n-1) / 2
+    num_unvisited_pairs = num_unvisited * (num_unvisited - 1.0) / 2.0  # [B, 1]
+
+    # Average distance between any two unvisited nodes
+    avg_pairwise_dist = sum_unvisited_pairwise_dists / torch.clamp(num_unvisited_pairs, min=1e-6) # [B, 1]
+
+    # Estimate remaining tour length: (num_unvisited - 1) edges needed to connect the subgraph
+    remaining_tour_cost = avg_pairwise_dist * (num_unvisited - 1.0) # [B, 1]
+
+    # Total estimated future cost, ensuring terminal states have zero value
+    value = (avg_dist_to_next + remaining_tour_cost) * (~is_terminal).float() # [B, 1]
+
+    # Final cleanup for numerical stability and magnitude control
+    value = torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
+    value = torch.clamp(value, min=0.0, max=1e4) # Clamp large values
+
+    return value
+================================================================================
+[HeuristicFinder] Runtime error in phi(state) during mse_phi_vs_value: name '__import__' is not defined
+ source code follows:
+================================================================================
+# THOUGHT: {auto}
+def phi(state):
+    """
+    Estimates the future tour length (cost-to-go) for a TSP state.
+
+    Args:
+        state: A TSPStateView object with helper methods.
+
+    Returns:
+        A torch tensor of shape [B, 1] representing the estimated future cost.
+    """
+    torch = __import__('torch')
+
+    # Get batch size from a reliable source
+    B = state.current_node_index().shape[0]
+    dev = state.all_node_coords().device
+
+    # Masks for visited and unvisited nodes
+    unvisited_mask = state.unvisited_mask()  # [B, N]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True).float()  # [B, 1]
+
+    # Handle terminal states where num_unvisited <= 1 (no more edges to form)
+    is_terminal = (num_unvisited <= 1.0)
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=dev)
+
+    # Get distance matrix
+    dist_matrix = state.distance_matrix()  # [B, N, N]
+
+    # --- Component 1: Expected cost from current node to the next unvisited node ---
+    current_node_idx = state.current_node_index()  # [B]
+    # Gather distances from the current node: shape [B, N]
+    dists_from_current = torch.gather(dist_matrix, 1, current_node_idx.view(B, 1, 1).expand(-1, 1, dist_matrix.shape[-1])).squeeze(1)
+
+    # Sum of distances from current to all unvisited nodes
+    sum_dists_to_unvisited = (dists_from_current * unvisited_mask).sum(dim=1, keepdim=True) # [B, 1]
+    # Average distance to the next node
+    avg_dist_to_next = sum_dists_to_unvisited / num_unvisited # [B, 1]
+
+    # --- Component 2: Expected cost of the remaining sub-tour among unvisited nodes ---
+    # Create a mask for pairs of unvisited nodes
+    unvisited_mask_2d = unvisited_mask.unsqueeze(2) * unvisited_mask.unsqueeze(1)  # [B, N, N]
+    # Mask the distance matrix to only include distances between unvisited nodes
+    unvisited_dists = dist_matrix * unvisited_mask_2d
+
+    # Sum of distances between all pairs of unvisited nodes (divide by 2 for unique pairs)
+    sum_unvisited_pairwise_dists = unvisited_dists.sum(dim=(1, 2), keepdim=True) / 2.0  # [B, 1]
+    # Number of unique pairs of unvisited nodes: n * (n-1) / 2
+    num_unvisited_pairs = num_unvisited * (num_unvisited - 1.0) / 2.0  # [B, 1]
+
+    # Average distance between any two unvisited nodes
+    avg_pairwise_dist = sum_unvisited_pairwise_dists / torch.clamp(num_unvisited_pairs, min=1e-6) # [B, 1]
+
+    # Estimate remaining tour length: (num_unvisited - 1) edges needed to connect the subgraph
+    remaining_tour_cost = avg_pairwise_dist * (num_unvisited - 1.0) # [B, 1]
+
+    # Total estimated future cost, ensuring terminal states have zero value
+    value = (avg_dist_to_next + remaining_tour_cost) * (~is_terminal).float() # [B, 1]
+
+    # Final cleanup for numerical stability and magnitude control
+    value = torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
+    value = torch.clamp(value, min=0.0, max=1e4) # Clamp large values
+
+    return value
+================================================================================
+[HeuristicFinder] Runtime error in phi(state) during mse_phi_vs_value: name '__import__' is not defined
+ source code follows:
+================================================================================
+# THOUGHT: {auto}
+def phi(state):
+    """
+    Estimates the future tour length (cost-to-go) for a TSP state.
+
+    Args:
+        state: A TSPStateView object with helper methods.
+
+    Returns:
+        A torch tensor of shape [B, 1] representing the estimated future cost.
+    """
+    torch = __import__('torch')
+
+    # Get batch size from a reliable source
+    B = state.current_node_index().shape[0]
+    dev = state.all_node_coords().device
+
+    # Masks for visited and unvisited nodes
+    unvisited_mask = state.unvisited_mask()  # [B, N]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True).float()  # [B, 1]
+
+    # Handle terminal states where num_unvisited <= 1 (no more edges to form)
+    is_terminal = (num_unvisited <= 1.0)
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=dev)
+
+    # Get distance matrix
+    dist_matrix = state.distance_matrix()  # [B, N, N]
+
+    # --- Component 1: Expected cost from current node to the next unvisited node ---
+    current_node_idx = state.current_node_index()  # [B]
+    # Gather distances from the current node: shape [B, N]
+    dists_from_current = torch.gather(dist_matrix, 1, current_node_idx.view(B, 1, 1).expand(-1, 1, dist_matrix.shape[-1])).squeeze(1)
+
+    # Sum of distances from current to all unvisited nodes
+    sum_dists_to_unvisited = (dists_from_current * unvisited_mask).sum(dim=1, keepdim=True) # [B, 1]
+    # Average distance to the next node
+    avg_dist_to_next = sum_dists_to_unvisited / num_unvisited # [B, 1]
+
+    # --- Component 2: Expected cost of the remaining sub-tour among unvisited nodes ---
+    # Create a mask for pairs of unvisited nodes
+    unvisited_mask_2d = unvisited_mask.unsqueeze(2) * unvisited_mask.unsqueeze(1)  # [B, N, N]
+    # Mask the distance matrix to only include distances between unvisited nodes
+    unvisited_dists = dist_matrix * unvisited_mask_2d
+
+    # Sum of distances between all pairs of unvisited nodes (divide by 2 for unique pairs)
+    sum_unvisited_pairwise_dists = unvisited_dists.sum(dim=(1, 2), keepdim=True) / 2.0  # [B, 1]
+    # Number of unique pairs of unvisited nodes: n * (n-1) / 2
+    num_unvisited_pairs = num_unvisited * (num_unvisited - 1.0) / 2.0  # [B, 1]
+
+    # Average distance between any two unvisited nodes
+    avg_pairwise_dist = sum_unvisited_pairwise_dists / torch.clamp(num_unvisited_pairs, min=1e-6) # [B, 1]
+
+    # Estimate remaining tour length: (num_unvisited - 1) edges needed to connect the subgraph
+    remaining_tour_cost = avg_pairwise_dist * (num_unvisited - 1.0) # [B, 1]
+
+    # Total estimated future cost, ensuring terminal states have zero value
+    value = (avg_dist_to_next + remaining_tour_cost) * (~is_terminal).float() # [B, 1]
+
+    # Final cleanup for numerical stability and magnitude control
+    value = torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
+    value = torch.clamp(value, min=0.0, max=1e4) # Clamp large values
+
+    return value
+================================================================================
+[HeuristicFinder] Runtime error in phi(state) during mse_phi_vs_value: name '__import__' is not defined
+ source code follows:
+================================================================================
+# THOUGHT: {auto}
+def phi(state):
+    """
+    Estimates the future tour length (cost-to-go) for a TSP state.
+
+    Args:
+        state: A TSPStateView object with helper methods.
+
+    Returns:
+        A torch tensor of shape [B, 1] representing the estimated future cost.
+    """
+    torch = __import__('torch')
+
+    # Get batch size from a reliable source
+    B = state.current_node_index().shape[0]
+    dev = state.all_node_coords().device
+
+    # Masks for visited and unvisited nodes
+    unvisited_mask = state.unvisited_mask()  # [B, N]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True).float()  # [B, 1]
+
+    # Handle terminal states where num_unvisited <= 1 (no more edges to form)
+    is_terminal = (num_unvisited <= 1.0)
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=dev)
+
+    # Get distance matrix
+    dist_matrix = state.distance_matrix()  # [B, N, N]
+
+    # --- Component 1: Expected cost from current node to the next unvisited node ---
+    current_node_idx = state.current_node_index()  # [B]
+    # Gather distances from the current node: shape [B, N]
+    dists_from_current = torch.gather(dist_matrix, 1, current_node_idx.view(B, 1, 1).expand(-1, 1, dist_matrix.shape[-1])).squeeze(1)
+
+    # Sum of distances from current to all unvisited nodes
+    sum_dists_to_unvisited = (dists_from_current * unvisited_mask).sum(dim=1, keepdim=True) # [B, 1]
+    # Average distance to the next node
+    avg_dist_to_next = sum_dists_to_unvisited / num_unvisited # [B, 1]
+
+    # --- Component 2: Expected cost of the remaining sub-tour among unvisited nodes ---
+    # Create a mask for pairs of unvisited nodes
+    unvisited_mask_2d = unvisited_mask.unsqueeze(2) * unvisited_mask.unsqueeze(1)  # [B, N, N]
+    # Mask the distance matrix to only include distances between unvisited nodes
+    unvisited_dists = dist_matrix * unvisited_mask_2d
+
+    # Sum of distances between all pairs of unvisited nodes (divide by 2 for unique pairs)
+    sum_unvisited_pairwise_dists = unvisited_dists.sum(dim=(1, 2), keepdim=True) / 2.0  # [B, 1]
+    # Number of unique pairs of unvisited nodes: n * (n-1) / 2
+    num_unvisited_pairs = num_unvisited * (num_unvisited - 1.0) / 2.0  # [B, 1]
+
+    # Average distance between any two unvisited nodes
+    avg_pairwise_dist = sum_unvisited_pairwise_dists / torch.clamp(num_unvisited_pairs, min=1e-6) # [B, 1]
+
+    # Estimate remaining tour length: (num_unvisited - 1) edges needed to connect the subgraph
+    remaining_tour_cost = avg_pairwise_dist * (num_unvisited - 1.0) # [B, 1]
+
+    # Total estimated future cost, ensuring terminal states have zero value
+    value = (avg_dist_to_next + remaining_tour_cost) * (~is_terminal).float() # [B, 1]
+
+    # Final cleanup for numerical stability and magnitude control
+    value = torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
+    value = torch.clamp(value, min=0.0, max=1e4) # Clamp large values
+
+    return value
+================================================================================
+Evoving generation 0/20...
+Requesting to LLM...
+Request cost time: 11.103495359420776 (s)
+Requesting to LLM...
+Request cost time: 12.72252368927002 (s)
+Requesting to LLM...
+Request cost time: 24.49986457824707 (s)
+Requesting to LLM...
+Request cost time: 11.620716333389282 (s)
+Requesting to LLM...
+Request cost time: 20.265430688858032 (s)
+Requesting to LLM...
+Request cost time: 11.16427493095398 (s)
+Requesting to LLM...
+Request cost time: 15.331203699111938 (s)
+Requesting to LLM...
+Request cost time: 16.98686981201172 (s)
+Requesting to LLM...
+Request cost time: 15.280944585800171 (s)
+Requesting to LLM...
+Request cost time: 14.726245403289795 (s)
+[HeuristicFinder] Runtime error in phi(state): The size of tensor a (8192) must match the size of tensor b (20) at non-singleton dimension 1 
+ source code follows:
+================================================================================
+def phi(state):
+    """
+    Estimates the future tour length (cost-to-go) for the TSP environment.
+    This heuristic combines the cost of connecting to and from the remaining sub-tour
+    with an MST-based lower bound estimate for the sub-tour itself.
+
+    Args:
+        state: A TSPStateView object with batch-friendly helper methods.
+
+    Returns:
+        A torch tensor of shape [B, 1] representing the estimated future cost.
+    """
+    # [B, N, N]
+    dist_matrix = state.distance_matrix()
+    # [B, N], True for unvisited
+    unvisited_mask = state.unvisited_mask()
+    # [B], index of current node
+    current_node = state.current_node_index()
+    # [B], index of start node
+    start_node = state.first_node_index()
+    # [B, N, 2]
+    coords = state.all_node_coords()
+
+    B, N, _ = coords.shape
+    device = coords.device
+
+    # A small value to add to denominators to prevent division by zero
+    epsilon = 1e-9
+    # A large value to mask out distances to/from visited nodes
+    inf = 1e9
+
+    # [B]
+    num_unvisited = unvisited_mask.sum(dim=1, dtype=torch.float32)
+    # [B, 1]
+    is_done_mask = (num_unvisited == 0).unsqueeze(1)
+
+    # 1. Cost to connect current node to the unvisited set (nearest neighbor)
+    # [B, 1, N]
+    current_node_idx_exp = current_node.view(B, 1, 1).expand(-1, 1, N)
+    # [B, N]
+    dists_from_current = dist_matrix.gather(1, current_node_idx_exp).squeeze(1)
+    # Mask out distances to visited nodes by setting them to infinity
+    # [B, N]
+    masked_dists_from_current = dists_from_current.masked_fill(~unvisited_mask, inf)
+    # [B]
+    min_dist_to_unvisited = masked_dists_from_current.min(dim=1).values
+    # Handle cases with no unvisited nodes where min would be inf
+    min_dist_to_unvisited = min_dist_to_unvisited.masked_fill(num_unvisited == 0, 0.0)
+
+    # 2. Cost to connect the unvisited set back to the start node (nearest neighbor)
+    # [B, N]
+    dists_to_start = dist_matrix[:, start_node, :] # Equivalent to gather
+    # [B, N]
+    masked_dists_to_start = dists_to_start.masked_fill(~unvisited_mask, inf)
+    # [B]
+    min_dist_from_unvisited_to_start = masked_dists_to_start.min(dim=1).values
+    min_dist_from_unvisited_to_start = min_dist_from_unvisited_to_start.masked_fill(num_unvisited == 0, 0.0)
+
+    # 3. Estimated cost of the sub-tour connecting unvisited nodes (MST lower bound)
+    # Create a sub-distance matrix for unvisited nodes only
+    # [B, N, 1] * [B, 1, N] -> [B, N, N]
+    unvisited_adj_mask = unvisited_mask.unsqueeze(2) & unvisited_mask.unsqueeze(1)
+    # [B, N, N]
+    sub_dist_matrix = dist_matrix.masked_fill(~unvisited_adj_mask, inf)
+
+    # Estimate MST cost using a heuristic: sum of min-edge-weights for each unvisited node
+    # This is an approximation, not the true MST, but avoids a complex algorithm.
+    # It's related to the sum of edges in a nearest-neighbor tour on the subgraph.
+    # [B, N]
+    min_edges_in_subgraph = sub_dist_matrix.min(dim=2).values
+    # Zero out the infs for visited nodes so they don't contribute to the sum
+    min_edges_in_subgraph = min_edges_in_subgraph.masked_fill(~unvisited_mask, 0.0)
+    # [B]
+    mst_cost_approx = min_edges_in_subgraph.sum(dim=1)
+    # A scaling factor, as the sum of min-edges overestimates the MST.
+    # Empirically, scaling by ~0.7-0.9 works well. Let's use 0.8.
+    mst_cost_approx = mst_cost_approx * 0.8
+
+    # Total estimated future cost
+    # [B]
+    value = min_dist_to_unvisited + mst_cost_approx + min_dist_from_unvisited_to_start
+
+    # Ensure terminal state value is 0
+    final_value = value.unsqueeze(1).masked_fill(is_done_mask, 0.0)
+
+    return final_value
+================================================================================
+Repairing code via llm...
+Requesting to LLM...
+Request cost time: 15.015267133712769 (s)
+[HeuristicFinder] Runtime error in phi(state) during mse_phi_vs_value: The size of tensor a (8192) must match the size of tensor b (20) at non-singleton dimension 1
+ source code follows:
+================================================================================
+def phi(state):
+    """
+    Estimates the future tour length (cost-to-go) for the TSP environment.
+    This heuristic combines the cost of connecting to and from the remaining sub-tour
+    with an MST-based lower bound estimate for the sub-tour itself.
+
+    Args:
+        state: A TSPStateView object with batch-friendly helper methods.
+
+    Returns:
+        A torch tensor of shape [B, 1] representing the estimated future cost.
+    """
+    # [B, N, N]
+    dist_matrix = state.distance_matrix()
+    # [B, N], True for unvisited
+    unvisited_mask = state.unvisited_mask()
+    # [B], index of current node
+    current_node = state.current_node_index()
+    # [B], index of start node
+    start_node = state.first_node_index()
+    # [B, N, 2]
+    coords = state.all_node_coords()
+
+    B, N, _ = coords.shape
+    device = coords.device
+
+    # A small value to add to denominators to prevent division by zero
+    epsilon = 1e-9
+    # A large value to mask out distances to/from visited nodes
+    inf = 1e9
+
+    # [B]
+    num_unvisited = unvisited_mask.sum(dim=1, dtype=torch.float32)
+    # [B, 1]
+    is_done_mask = (num_unvisited == 0).unsqueeze(1)
+
+    # 1. Cost to connect current node to the unvisited set (nearest neighbor)
+    # [B, 1, N]
+    current_node_idx_exp = current_node.view(B, 1, 1).expand(-1, 1, N)
+    # [B, N]
+    dists_from_current = dist_matrix.gather(1, current_node_idx_exp).squeeze(1)
+    # Mask out distances to visited nodes by setting them to infinity
+    # [B, N]
+    masked_dists_from_current = dists_from_current.masked_fill(~unvisited_mask, inf)
+    # [B]
+    min_dist_to_unvisited = masked_dists_from_current.min(dim=1).values
+    # Handle cases with no unvisited nodes where min would be inf
+    min_dist_to_unvisited = min_dist_to_unvisited.masked_fill(num_unvisited == 0, 0.0)
+
+    # 2. Cost to connect the unvisited set back to the start node (nearest neighbor)
+    # [B, N]
+    dists_to_start = dist_matrix[:, start_node, :] # Equivalent to gather
+    # [B, N]
+    masked_dists_to_start = dists_to_start.masked_fill(~unvisited_mask, inf)
+    # [B]
+    min_dist_from_unvisited_to_start = masked_dists_to_start.min(dim=1).values
+    min_dist_from_unvisited_to_start = min_dist_from_unvisited_to_start.masked_fill(num_unvisited == 0, 0.0)
+
+    # 3. Estimated cost of the sub-tour connecting unvisited nodes (MST lower bound)
+    # Create a sub-distance matrix for unvisited nodes only
+    # [B, N, 1] * [B, 1, N] -> [B, N, N]
+    unvisited_adj_mask = unvisited_mask.unsqueeze(2) & unvisited_mask.unsqueeze(1)
+    # [B, N, N]
+    sub_dist_matrix = dist_matrix.masked_fill(~unvisited_adj_mask, inf)
+
+    # Estimate MST cost using a heuristic: sum of min-edge-weights for each unvisited node
+    # This is an approximation, not the true MST, but avoids a complex algorithm.
+    # It's related to the sum of edges in a nearest-neighbor tour on the subgraph.
+    # [B, N]
+    min_edges_in_subgraph = sub_dist_matrix.min(dim=2).values
+    # Zero out the infs for visited nodes so they don't contribute to the sum
+    min_edges_in_subgraph = min_edges_in_subgraph.masked_fill(~unvisited_mask, 0.0)
+    # [B]
+    mst_cost_approx = min_edges_in_subgraph.sum(dim=1)
+    # A scaling factor, as the sum of min-edges overestimates the MST.
+    # Empirically, scaling by ~0.7-0.9 works well. Let's use 0.8.
+    mst_cost_approx = mst_cost_approx * 0.8
+
+    # Total estimated future cost
+    # [B]
+    value = min_dist_to_unvisited + mst_cost_approx + min_dist_from_unvisited_to_start
+
+    # Ensure terminal state value is 0
+    final_value = value.unsqueeze(1).masked_fill(is_done_mask, 0.0)
+
+    return final_value
+================================================================================
+[HeuristicFinder] Runtime error in phi(state) during mse_phi_vs_value: The size of tensor a (8192) must match the size of tensor b (20) at non-singleton dimension 1
+ source code follows:
+================================================================================
+def phi(state):
+    """
+    Estimates the future tour length (cost-to-go) for the TSP environment.
+    This heuristic combines the cost of connecting to and from the remaining sub-tour
+    with an MST-based lower bound estimate for the sub-tour itself.
+
+    Args:
+        state: A TSPStateView object with batch-friendly helper methods.
+
+    Returns:
+        A torch tensor of shape [B, 1] representing the estimated future cost.
+    """
+    # [B, N, N]
+    dist_matrix = state.distance_matrix()
+    # [B, N], True for unvisited
+    unvisited_mask = state.unvisited_mask()
+    # [B], index of current node
+    current_node = state.current_node_index()
+    # [B], index of start node
+    start_node = state.first_node_index()
+    # [B, N, 2]
+    coords = state.all_node_coords()
+
+    B, N, _ = coords.shape
+    device = coords.device
+
+    # A small value to add to denominators to prevent division by zero
+    epsilon = 1e-9
+    # A large value to mask out distances to/from visited nodes
+    inf = 1e9
+
+    # [B]
+    num_unvisited = unvisited_mask.sum(dim=1, dtype=torch.float32)
+    # [B, 1]
+    is_done_mask = (num_unvisited == 0).unsqueeze(1)
+
+    # 1. Cost to connect current node to the unvisited set (nearest neighbor)
+    # [B, 1, N]
+    current_node_idx_exp = current_node.view(B, 1, 1).expand(-1, 1, N)
+    # [B, N]
+    dists_from_current = dist_matrix.gather(1, current_node_idx_exp).squeeze(1)
+    # Mask out distances to visited nodes by setting them to infinity
+    # [B, N]
+    masked_dists_from_current = dists_from_current.masked_fill(~unvisited_mask, inf)
+    # [B]
+    min_dist_to_unvisited = masked_dists_from_current.min(dim=1).values
+    # Handle cases with no unvisited nodes where min would be inf
+    min_dist_to_unvisited = min_dist_to_unvisited.masked_fill(num_unvisited == 0, 0.0)
+
+    # 2. Cost to connect the unvisited set back to the start node (nearest neighbor)
+    # [B, N]
+    dists_to_start = dist_matrix[:, start_node, :] # Equivalent to gather
+    # [B, N]
+    masked_dists_to_start = dists_to_start.masked_fill(~unvisited_mask, inf)
+    # [B]
+    min_dist_from_unvisited_to_start = masked_dists_to_start.min(dim=1).values
+    min_dist_from_unvisited_to_start = min_dist_from_unvisited_to_start.masked_fill(num_unvisited == 0, 0.0)
+
+    # 3. Estimated cost of the sub-tour connecting unvisited nodes (MST lower bound)
+    # Create a sub-distance matrix for unvisited nodes only
+    # [B, N, 1] * [B, 1, N] -> [B, N, N]
+    unvisited_adj_mask = unvisited_mask.unsqueeze(2) & unvisited_mask.unsqueeze(1)
+    # [B, N, N]
+    sub_dist_matrix = dist_matrix.masked_fill(~unvisited_adj_mask, inf)
+
+    # Estimate MST cost using a heuristic: sum of min-edge-weights for each unvisited node
+    # This is an approximation, not the true MST, but avoids a complex algorithm.
+    # It's related to the sum of edges in a nearest-neighbor tour on the subgraph.
+    # [B, N]
+    min_edges_in_subgraph = sub_dist_matrix.min(dim=2).values
+    # Zero out the infs for visited nodes so they don't contribute to the sum
+    min_edges_in_subgraph = min_edges_in_subgraph.masked_fill(~unvisited_mask, 0.0)
+    # [B]
+    mst_cost_approx = min_edges_in_subgraph.sum(dim=1)
+    # A scaling factor, as the sum of min-edges overestimates the MST.
+    # Empirically, scaling by ~0.7-0.9 works well. Let's use 0.8.
+    mst_cost_approx = mst_cost_approx * 0.8
+
+    # Total estimated future cost
+    # [B]
+    value = min_dist_to_unvisited + mst_cost_approx + min_dist_from_unvisited_to_start
+
+    # Ensure terminal state value is 0
+    final_value = value.unsqueeze(1).masked_fill(is_done_mask, 0.0)
+
+    return final_value
+================================================================================
+[HeuristicFinder] Runtime error in phi(state) during mse_phi_vs_value: CUDA out of memory. Tried to allocate 12.50 GiB. GPU 0 has a total capacity of 23.69 GiB of which 9.70 GiB is free. Including non-PyTorch memory, this process has 13.99 GiB memory in use. Of the allocated memory 12.58 GiB is allocated by PyTorch, and 576.55 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+ source code follows:
+================================================================================
+def phi(state):
+    """
+    Estimates the future tour length (cost-to-go) for the TSP environment.
+    This heuristic combines the cost of connecting to and from the remaining sub-tour
+    with an MST-based lower bound estimate for the sub-tour itself.
+
+    Args:
+        state: A TSPStateView object with batch-friendly helper methods.
+
+    Returns:
+        A torch tensor of shape [B, 1] representing the estimated future cost.
+    """
+    # [B, N, N]
+    dist_matrix = state.distance_matrix()
+    # [B, N], True for unvisited
+    unvisited_mask = state.unvisited_mask()
+    # [B], index of current node
+    current_node = state.current_node_index()
+    # [B], index of start node
+    start_node = state.first_node_index()
+    # [B, N, 2]
+    coords = state.all_node_coords()
+
+    B, N, _ = coords.shape
+    device = coords.device
+
+    # A small value to add to denominators to prevent division by zero
+    epsilon = 1e-9
+    # A large value to mask out distances to/from visited nodes
+    inf = 1e9
+
+    # [B]
+    num_unvisited = unvisited_mask.sum(dim=1, dtype=torch.float32)
+    # [B, 1]
+    is_done_mask = (num_unvisited == 0).unsqueeze(1)
+
+    # 1. Cost to connect current node to the unvisited set (nearest neighbor)
+    # [B, 1, N]
+    current_node_idx_exp = current_node.view(B, 1, 1).expand(-1, 1, N)
+    # [B, N]
+    dists_from_current = dist_matrix.gather(1, current_node_idx_exp).squeeze(1)
+    # Mask out distances to visited nodes by setting them to infinity
+    # [B, N]
+    masked_dists_from_current = dists_from_current.masked_fill(~unvisited_mask, inf)
+    # [B]
+    min_dist_to_unvisited = masked_dists_from_current.min(dim=1).values
+    # Handle cases with no unvisited nodes where min would be inf
+    min_dist_to_unvisited = min_dist_to_unvisited.masked_fill(num_unvisited == 0, 0.0)
+
+    # 2. Cost to connect the unvisited set back to the start node (nearest neighbor)
+    # [B, N]
+    dists_to_start = dist_matrix[:, start_node, :] # Equivalent to gather
+    # [B, N]
+    masked_dists_to_start = dists_to_start.masked_fill(~unvisited_mask, inf)
+    # [B]
+    min_dist_from_unvisited_to_start = masked_dists_to_start.min(dim=1).values
+    min_dist_from_unvisited_to_start = min_dist_from_unvisited_to_start.masked_fill(num_unvisited == 0, 0.0)
+
+    # 3. Estimated cost of the sub-tour connecting unvisited nodes (MST lower bound)
+    # Create a sub-distance matrix for unvisited nodes only
+    # [B, N, 1] * [B, 1, N] -> [B, N, N]
+    unvisited_adj_mask = unvisited_mask.unsqueeze(2) & unvisited_mask.unsqueeze(1)
+    # [B, N, N]
+    sub_dist_matrix = dist_matrix.masked_fill(~unvisited_adj_mask, inf)
+
+    # Estimate MST cost using a heuristic: sum of min-edge-weights for each unvisited node
+    # This is an approximation, not the true MST, but avoids a complex algorithm.
+    # It's related to the sum of edges in a nearest-neighbor tour on the subgraph.
+    # [B, N]
+    min_edges_in_subgraph = sub_dist_matrix.min(dim=2).values
+    # Zero out the infs for visited nodes so they don't contribute to the sum
+    min_edges_in_subgraph = min_edges_in_subgraph.masked_fill(~unvisited_mask, 0.0)
+    # [B]
+    mst_cost_approx = min_edges_in_subgraph.sum(dim=1)
+    # A scaling factor, as the sum of min-edges overestimates the MST.
+    # Empirically, scaling by ~0.7-0.9 works well. Let's use 0.8.
+    mst_cost_approx = mst_cost_approx * 0.8
+
+    # Total estimated future cost
+    # [B]
+    value = min_dist_to_unvisited + mst_cost_approx + min_dist_from_unvisited_to_start
+
+    # Ensure terminal state value is 0
+    final_value = value.unsqueeze(1).masked_fill(is_done_mask, 0.0)
+
+    return final_value
+================================================================================
+[HeuristicFinder] Runtime error in phi(state) during mse_phi_vs_value: CUDA out of memory. Tried to allocate 25.00 GiB. GPU 0 has a total capacity of 23.69 GiB of which 10.33 GiB is free. Including non-PyTorch memory, this process has 13.36 GiB memory in use. Of the allocated memory 326.07 MiB is allocated by PyTorch, and 12.20 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+ source code follows:
+================================================================================
+def phi(state):
+    """
+    Estimates the future tour length (cost-to-go) for the TSP environment.
+    This heuristic combines the cost of connecting to and from the remaining sub-tour
+    with an MST-based lower bound estimate for the sub-tour itself.
+
+    Args:
+        state: A TSPStateView object with batch-friendly helper methods.
+
+    Returns:
+        A torch tensor of shape [B, 1] representing the estimated future cost.
+    """
+    # [B, N, N]
+    dist_matrix = state.distance_matrix()
+    # [B, N], True for unvisited
+    unvisited_mask = state.unvisited_mask()
+    # [B], index of current node
+    current_node = state.current_node_index()
+    # [B], index of start node
+    start_node = state.first_node_index()
+    # [B, N, 2]
+    coords = state.all_node_coords()
+
+    B, N, _ = coords.shape
+    device = coords.device
+
+    # A small value to add to denominators to prevent division by zero
+    epsilon = 1e-9
+    # A large value to mask out distances to/from visited nodes
+    inf = 1e9
+
+    # [B]
+    num_unvisited = unvisited_mask.sum(dim=1, dtype=torch.float32)
+    # [B, 1]
+    is_done_mask = (num_unvisited == 0).unsqueeze(1)
+
+    # 1. Cost to connect current node to the unvisited set (nearest neighbor)
+    # [B, 1, N]
+    current_node_idx_exp = current_node.view(B, 1, 1).expand(-1, 1, N)
+    # [B, N]
+    dists_from_current = dist_matrix.gather(1, current_node_idx_exp).squeeze(1)
+    # Mask out distances to visited nodes by setting them to infinity
+    # [B, N]
+    masked_dists_from_current = dists_from_current.masked_fill(~unvisited_mask, inf)
+    # [B]
+    min_dist_to_unvisited = masked_dists_from_current.min(dim=1).values
+    # Handle cases with no unvisited nodes where min would be inf
+    min_dist_to_unvisited = min_dist_to_unvisited.masked_fill(num_unvisited == 0, 0.0)
+
+    # 2. Cost to connect the unvisited set back to the start node (nearest neighbor)
+    # [B, N]
+    dists_to_start = dist_matrix[:, start_node, :] # Equivalent to gather
+    # [B, N]
+    masked_dists_to_start = dists_to_start.masked_fill(~unvisited_mask, inf)
+    # [B]
+    min_dist_from_unvisited_to_start = masked_dists_to_start.min(dim=1).values
+    min_dist_from_unvisited_to_start = min_dist_from_unvisited_to_start.masked_fill(num_unvisited == 0, 0.0)
+
+    # 3. Estimated cost of the sub-tour connecting unvisited nodes (MST lower bound)
+    # Create a sub-distance matrix for unvisited nodes only
+    # [B, N, 1] * [B, 1, N] -> [B, N, N]
+    unvisited_adj_mask = unvisited_mask.unsqueeze(2) & unvisited_mask.unsqueeze(1)
+    # [B, N, N]
+    sub_dist_matrix = dist_matrix.masked_fill(~unvisited_adj_mask, inf)
+
+    # Estimate MST cost using a heuristic: sum of min-edge-weights for each unvisited node
+    # This is an approximation, not the true MST, but avoids a complex algorithm.
+    # It's related to the sum of edges in a nearest-neighbor tour on the subgraph.
+    # [B, N]
+    min_edges_in_subgraph = sub_dist_matrix.min(dim=2).values
+    # Zero out the infs for visited nodes so they don't contribute to the sum
+    min_edges_in_subgraph = min_edges_in_subgraph.masked_fill(~unvisited_mask, 0.0)
+    # [B]
+    mst_cost_approx = min_edges_in_subgraph.sum(dim=1)
+    # A scaling factor, as the sum of min-edges overestimates the MST.
+    # Empirically, scaling by ~0.7-0.9 works well. Let's use 0.8.
+    mst_cost_approx = mst_cost_approx * 0.8
+
+    # Total estimated future cost
+    # [B]
+    value = min_dist_to_unvisited + mst_cost_approx + min_dist_from_unvisited_to_start
+
+    # Ensure terminal state value is 0
+    final_value = value.unsqueeze(1).masked_fill(is_done_mask, 0.0)
+
+    return final_value
+================================================================================
+Requesting to LLM...
+Request cost time: 16.847504377365112 (s)
+Requesting to LLM...
+Request cost time: 11.062694787979126 (s)
+Requesting to LLM...
+Request cost time: 17.618195056915283 (s)
+Requesting to LLM...
+Request cost time: 13.9229576587677 (s)
+Requesting to LLM...
+Request cost time: 11.031220197677612 (s)
+Requesting to LLM...
+Request cost time: 12.685259580612183 (s)
+Requesting to LLM...
+Request cost time: 12.040452003479004 (s)
+Requesting to LLM...
+Request cost time: 13.648051977157593 (s)
+Requesting to LLM...
+Request cost time: 17.244468450546265 (s)
+Requesting to LLM...
+Request cost time: 12.967507362365723 (s)
+[HeuristicFinder] Runtime error in phi(state): The size of tensor a (20) must match the size of tensor b (8192) at non-singleton dimension 2 
+ source code follows:
+================================================================================
+def phi(state):
+    """
+    Estimates the future tour length using a convex hull approximation of the unvisited nodes.
+
+    The heuristic is composed of three parts:
+    1.  **Convex Hull Perimeter**: The perimeter of the convex hull enclosing all unvisited nodes
+        serves as a lower-bound estimate for the sub-tour connecting them. This captures the
+        geometric spread of the remaining problem.
+    2.  **Entry Cost**: The minimum distance from the current node to any node on the convex hull.
+        This represents the cost to "enter" the cluster of unvisited nodes.
+    3.  **Exit Cost**: The minimum distance from any node on the convex hull back to the starting node.
+        This represents the cost to "exit" the cluster and close the tour.
+
+    The sum of these three components provides an estimate of the remaining tour length.
+    It naturally decreases as nodes are visited and removed from the hull.
+
+    Args:
+        state (TSPStateView): The current state of the TSP environment.
+
+    Returns:
+        torch.Tensor: A scalar potential value per batch element, broadcastable to [B, 1].
+    """
+    # [B, N, 2]
+    coords = state.all_node_coords()
+    # [B, N]
+    unvisited_mask = state.unvisited_mask()
+    # [B]
+    current_node_idx = state.current_node_index()
+    # [B]
+    start_node_idx = state.first_node_index()
+    # [B, N, N]
+    dist_matrix = state.distance_matrix()
+
+    B, N, _ = coords.shape
+    device = coords.device
+
+    # Handle terminal states where num_unvisited <= 1
+    num_unvisited = unvisited_mask.sum(dim=1)
+    is_terminal = num_unvisited <= 1
+
+    # For terminal states, the only future cost is returning to start.
+    # [B]
+    terminal_cost = dist_matrix[
+        torch.arange(B, device=device), current_node_idx, start_node_idx
+    ]
+    terminal_cost = terminal_cost * (~is_terminal).logical_not() # Zero out non-terminal
+
+    # --- Calculations for non-terminal states ---
+    # Create a large value to mask out visited nodes
+    large_coord_val = torch.finfo(coords.dtype).max
+    # [B, N, 2] -> Set coords of visited nodes to a large value
+    unvisited_coords = coords.where(unvisited_mask.unsqueeze(-1), torch.tensor(large_coord_val, device=device))
+
+    # --- 1. Convex Hull Perimeter of Unvisited Nodes ---
+    # Find the min/max x and y coordinates among unvisited nodes
+    # [B, 2]
+    min_xy = torch.min(unvisited_coords, dim=1).values
+    max_xy = torch.max(coords.where(unvisited_mask.unsqueeze(-1), torch.tensor(-large_coord_val, device=device)), dim=1).values
+
+    # Approximate perimeter of the bounding box as a proxy for convex hull perimeter
+    # 2 * (width + height)
+    # [B]
+    width = max_xy[:, 0] - min_xy[:, 0]
+    height = max_xy[:, 1] - min_xy[:, 1]
+    # Clamp to avoid negative perimeter if only one node is left
+    hull_perimeter = 2 * (torch.clamp(width, min=0) + torch.clamp(height, min=0))
+
+    # --- 2. Entry Cost: Min distance from current node to any unvisited node ---
+    # [B, N]
+    dist_from_current = dist_matrix[torch.arange(B, device=device), current_node_idx, :]
+    # Set distances to visited nodes to infinity
+    large_dist_val = torch.finfo(dist_matrix.dtype).max
+    dist_from_current_unvisited = dist_from_current.where(unvisited_mask, torch.tensor(large_dist_val, device=device))
+    # [B]
+    entry_cost, _ = torch.min(dist_from_current_unvisited, dim=1)
+    # Handle case where no unvisited nodes exist (min will be large_val)
+    entry_cost = entry_cost.masked_fill(num_unvisited == 0, 0.0)
+
+    # --- 3. Exit Cost: Min distance from any unvisited node to the start node ---
+    # [B, N]
+    dist_to_start = dist_matrix[:, :, start_node_idx]
+    # Set distances from visited nodes to infinity
+    dist_to_start_unvisited = dist_to_start.where(unvisited_mask, torch.tensor(large_dist_val, device=device))
+    # [B]
+    exit_cost, _ = torch.min(dist_to_start_unvisited, dim=1)
+    # Handle case where no unvisited nodes exist
+    exit_cost = exit_cost.masked_fill(num_unvisited == 0, 0.0)
+
+    # --- Combine costs for non-terminal states ---
+    # [B]
+    non_terminal_cost = hull_perimeter + entry_cost + exit_cost
+    non_terminal_cost = non_terminal_cost * is_terminal.logical_not() # Zero out terminal
+
+    # Total potential is the sum of terminal and non-terminal costs
+    total_potential = terminal_cost + non_terminal_cost
+
+    return total_potential.unsqueeze(1)
+================================================================================
+Repairing code via llm...
+Requesting to LLM...
+Request cost time: 14.02336072921753 (s)
+Requesting to LLM...
+Request cost time: 14.035221099853516 (s)
+Requesting to LLM...
+Request cost time: 15.715850830078125 (s)
+Requesting to LLM...
+Request cost time: 13.654441833496094 (s)
+Requesting to LLM...
+Request cost time: 15.421029329299927 (s)
+Requesting to LLM...
+Request cost time: 13.390707969665527 (s)
+Requesting to LLM...
+Request cost time: 12.011872053146362 (s)
+Requesting to LLM...
+Request cost time: 13.151090383529663 (s)
+Requesting to LLM...
+Request cost time: 14.875667572021484 (s)
+Requesting to LLM...
+Request cost time: 11.25133490562439 (s)
+Requesting to LLM...
+Request cost time: 10.06710410118103 (s)
+[HeuristicFinder] Runtime error in phi(state): CUDA out of memory. Tried to allocate 5.00 GiB. GPU 0 has a total capacity of 23.69 GiB of which 2.80 GiB is free. Including non-PyTorch memory, this process has 20.89 GiB memory in use. Of the allocated memory 20.03 GiB is allocated by PyTorch, and 16.37 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables) 
+ source code follows:
+================================================================================
+def phi(state):
+    """
+    Estimates the future tour length (cost-to-go) for the TSP environment using an MST-based heuristic.
+
+    Args:
+        state (TSPStateView): The current state of the TSP environment.
+
+    Returns:
+        torch.Tensor: A scalar tensor [B, 1] representing the estimated future tour length.
+    """
+    # [B, N, N]
+    dist_matrix = state.distance_matrix()
+    # [B, N], True for unvisited
+    unvisited_mask = state.unvisited_mask()
+    # [B], index of current node
+    current_node = state.current_node_index()
+    # [B], index of start node
+    start_node = state.first_node_index()
+    # [B, 1], number of unvisited nodes
+    n_unvisited = unvisited_mask.sum(dim=1, keepdim=True)
+
+    # For non-terminal states (n_unvisited > 0)
+    # 1. Cost to connect current node to the set of unvisited nodes
+    # Find the minimum distance from the current node to any unvisited node.
+    # [B, 1, N]
+    current_node_expanded = current_node.unsqueeze(1).unsqueeze(2).expand(-1, 1, dist_matrix.size(2))
+    # [B, N]
+    dist_from_current = dist_matrix.gather(1, current_node_expanded).squeeze(1)
+    # Set distances to visited nodes to infinity
+    dist_from_current_to_unvisited = dist_from_current.masked_fill(~unvisited_mask, float('inf'))
+    # [B, 1], min distance to an unvisited node
+    cost_to_connect_current = dist_from_current_to_unvisited.min(dim=1, keepdim=True)[0]
+    # Handle case where n_unvisited is 1, min is inf, should be 0.
+    cost_to_connect_current = torch.where(n_unvisited <= 1, 0.0, cost_to_connect_current)
+
+
+    # 2. Approximate tour length among unvisited nodes (MST heuristic)
+    # Create a sub-matrix of distances only between unvisited nodes.
+    # [B, N, N]
+    unvisited_dist_mask = unvisited_mask.unsqueeze(2) * unvisited_mask.unsqueeze(1)
+    # Set distances involving visited nodes to infinity
+    sub_dist_matrix = dist_matrix.masked_fill(~unvisited_dist_mask, float('inf'))
+    # Approximate MST cost by summing min edge costs for each unvisited node
+    # This is a lower bound on MST and much cheaper to compute than a full MST algorithm.
+    # Replace diagonal infs with 0 to avoid issues with min operation if a node is the only one left.
+    sub_dist_matrix.diagonal(dim1=-2, dim2=-1).fill_(0)
+    # [B, N]
+    min_edge_costs, _ = sub_dist_matrix.min(dim=2)
+    # [B, 1], sum of min edge costs for unvisited nodes
+    mst_cost_approx = min_edge_costs.masked_fill(~unvisited_mask, 0.0).sum(dim=1, keepdim=True)
+
+    # 3. Cost to connect the set of unvisited nodes back to the start node
+    # Find the minimum distance from any unvisited node to the start node.
+    # [B, N]
+    dist_to_start = dist_matrix[:, start_node.squeeze(), :]
+    # Set distances from visited nodes to infinity
+    dist_from_unvisited_to_start = dist_to_start.masked_fill(~unvisited_mask, float('inf'))
+    # [B, 1], min distance from an unvisited node to the start node
+    cost_to_connect_start = dist_from_unvisited_to_start.min(dim=1, keepdim=True)[0]
+
+    # Combine the components
+    value = cost_to_connect_current + mst_cost_approx + cost_to_connect_start
+
+    # For terminal states (no unvisited nodes), the future cost is 0.
+    # is_done is [B, 1]
+    is_done = (n_unvisited == 0)
+    final_value = torch.where(is_done, torch.zeros_like(value), value)
+
+    # Replace any remaining infinities (e.g., from min over empty sets) with 0.
+    return torch.nan_to_num(final_value, posinf=0.0)
+================================================================================
+Repairing code via llm...
+Requesting to LLM...
+Request cost time: 10.718597173690796 (s)
+Requesting to LLM...
+Request cost time: 12.36594843864441 (s)
+Requesting to LLM...
+Request cost time: 9.954680919647217 (s)
+Requesting to LLM...
+Request cost time: 11.706243515014648 (s)
+Requesting to LLM...
+Request cost time: 9.434046983718872 (s)
+Requesting to LLM...
+Request cost time: 11.383594751358032 (s)
+Requesting to LLM...
+Request cost time: 10.394176244735718 (s)
+Requesting to LLM...
+Request cost time: 10.908030986785889 (s)
+Requesting to LLM...
+Request cost time: 11.05979299545288 (s)
+Requesting to LLM...
+Request cost time: 11.641290187835693 (s)
+Requesting to LLM...
+Request cost time: 13.245441913604736 (s)
+Evoving generation 1/20...
+Requesting to LLM...
+Request cost time: 11.778319835662842 (s)
+Requesting to LLM...
+Request cost time: 13.185882806777954 (s)
+Requesting to LLM...
+Request cost time: 9.646106481552124 (s)
+Requesting to LLM...
+Request cost time: 11.415838718414307 (s)
+Requesting to LLM...
+Request cost time: 10.776108026504517 (s)
+Requesting to LLM...
+Request cost time: 15.454888105392456 (s)
+Requesting to LLM...
+Request cost time: 11.432005643844604 (s)
+Requesting to LLM...
+Request cost time: 15.946071147918701 (s)
+Requesting to LLM...
+Request cost time: 12.174920082092285 (s)
+Requesting to LLM...
+Request cost time: 13.658584356307983 (s)
+[HeuristicFinder] Runtime error in phi(state): module 'torch' has no attribute 'nanmin' 
+ source code follows:
+================================================================================
+def phi(state):
+    """
+    Estimates future tour length based on the geometric properties of visited and unvisited node sets.
+    The potential is composed of two parts:
+    1. The cost to connect the current and start nodes to the nearest unvisited nodes.
+    2. The average distance from each unvisited node to the convex hull of the visited nodes,
+       which represents the cost of "enclosing" the current tour. This is scaled by the number
+       of unvisited nodes to approximate the remaining tour length within the unvisited cluster.
+    """
+    B, N, _ = state.all_node_coords().shape
+    device = state.all_node_coords().device
+
+    unvisited_mask = state.unvisited_mask()  # [B, N]
+    visited_mask = ~unvisited_mask  # [B, N]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True).float()  # [B, 1]
+
+    # Handle terminal states (<= 1 unvisited node)
+    is_terminal = num_unvisited <= 1
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=device)
+
+    # 1. Estimate connection costs to the unvisited subgraph
+    dist_matrix = state.distance_matrix()  # [B, N, N]
+    current_node_idx = state.current_node_index()  # [B]
+    start_node_idx = state.first_node_index()  # [B]
+
+    # Min distance from current node to any unvisited node
+    dist_from_current = dist_matrix.gather(1, current_node_idx.view(B, 1, 1).expand(-1, 1, N)).squeeze(1)  # [B, N]
+    dist_from_current.masked_fill_(~unvisited_mask, float('inf'))
+    min_dist_from_current = torch.min(dist_from_current, dim=1, keepdim=True).values  # [B, 1]
+
+    # Min distance from start node to any unvisited node (for closing the tour)
+    dist_from_start = dist_matrix.gather(1, start_node_idx.view(B, 1, 1).expand(-1, 1, N)).squeeze(1)  # [B, N]
+    dist_from_start.masked_fill_(~unvisited_mask, float('inf'))
+    min_dist_from_start = torch.min(dist_from_start, dim=1, keepdim=True).values  # [B, 1]
+
+    connection_cost = torch.nan_to_num(min_dist_from_current, posinf=0.0) + torch.nan_to_num(min_dist_from_start, posinf=0.0)
+
+    # 2. Estimate remaining tour cost based on geometric dispersion
+    all_coords = state.all_node_coords()  # [B, N, 2]
+    unvisited_coords = all_coords.masked_fill(~unvisited_mask.unsqueeze(-1), float('nan'))  # [B, N, 2]
+    visited_coords = all_coords.masked_fill(~visited_mask.unsqueeze(-1), float('nan'))    # [B, N, 2]
+
+    # Find the min/max coordinates of the visited nodes to define a bounding box (proxy for convex hull)
+    # Using nanmin/nanmax safely handles cases with few visited nodes.
+    # The clamp ensures that if all nodes are unvisited, we don't get inf/-inf.
+    min_visited_coords = torch.nan_to_num(torch.nanmin(visited_coords, dim=1, keepdim=True).values, nan=0.0, posinf=1.0, neginf=0.0) # [B, 1, 2]
+    max_visited_coords = torch.nan_to_num(torch.nanmax(visited_coords, dim=1, keepdim=True).values, nan=0.0, posinf=1.0, neginf=0.0) # [B, 1, 2]
+
+    # For each unvisited node, find the distance to the bounding box of visited nodes.
+    # If a point is inside the box, its distance is 0.
+    # This approximates the distance to the convex hull of the visited set.
+    # unvisited_coords: [B, N, 2], min/max_visited_coords: [B, 1, 2]
+    dx = torch.max(torch.zeros_like(all_coords), min_visited_coords - unvisited_coords) + \
+         torch.max(torch.zeros_like(all_coords), unvisited_coords - max_visited_coords) # [B, N, 2]
+    dist_to_hull = torch.linalg.norm(dx, dim=2) # [B, N]
+
+    # Calculate the average distance for unvisited nodes only
+    masked_dist_to_hull = torch.where(unvisited_mask, dist_to_hull, 0.0)
+    avg_dist_to_hull = masked_dist_to_hull.sum(dim=1, keepdim=True) / torch.clamp(num_unvisited, min=1.0) # [B, 1]
+
+    # The remaining tour length is estimated by scaling this average distance by the number of unvisited nodes.
+    # A scaling factor is added to better approximate tour length over simple distance sum.
+    remaining_tour_est = 1.2 * avg_dist_to_hull * torch.clamp(num_unvisited - 1, min=0.0) # [B, 1]
+
+    # 3. Combine components
+    value = connection_cost + remaining_tour_est
+
+    # Ensure terminal states have zero potential
+    final_value = torch.where(is_terminal, torch.zeros_like(value), value)
+
+    return final_value
+================================================================================
+Repairing code via llm...
+Requesting to LLM...
+Request cost time: 13.094803094863892 (s)
+Requesting to LLM...
+Request cost time: 12.273489475250244 (s)
+Requesting to LLM...
+Request cost time: 12.841302394866943 (s)
+Requesting to LLM...
+Request cost time: 11.591144561767578 (s)
+Requesting to LLM...
+Request cost time: 16.08505392074585 (s)
+Requesting to LLM...
+Request cost time: 15.501110553741455 (s)
+Requesting to LLM...
+Request cost time: 9.393076658248901 (s)
+Requesting to LLM...
+Request cost time: 12.72668743133545 (s)
+Requesting to LLM...
+Request cost time: 13.300381183624268 (s)
+Requesting to LLM...
+Request cost time: 11.142444372177124 (s)
+Requesting to LLM...
+Request cost time: 13.261671543121338 (s)
+[HeuristicFinder] Runtime error in phi(state): The size of tensor a (20) must match the size of tensor b (8192) at non-singleton dimension 1 
+ source code follows:
+================================================================================
+def phi(state):
+    """
+    Estimates future tour length using the convex hull of unvisited nodes.
+    The cost is the sum of:
+    1. The perimeter of the convex hull of unvisited nodes.
+    2. The distance from the current node to the closest node on the hull.
+    3. The distance from the start node to the closest node on the hull.
+    This captures the geometric lower bound of the remaining path and connection costs.
+    """
+    # [B, N, 2]
+    coords = state.all_node_coords()
+    B, N, _ = coords.shape
+    device = coords.device
+    # [B, N], True for unvisited
+    unvisited_mask = state.unvisited_mask()
+    # [B, 1]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True)
+
+    # Handle terminal states where a hull cannot be formed (<= 2 nodes)
+    is_terminal = (num_unvisited <= 2)
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=device)
+
+    # 1. Compute the convex hull perimeter for unvisited nodes
+    # Create a tensor of unvisited coordinates by masking
+    # Use a large coordinate for visited nodes to push them out of the hull calculation
+    large_coord = coords.abs().max() + 1.0
+    masked_coords = torch.where(unvisited_mask.unsqueeze(-1), coords, torch.full_like(coords, large_coord))
+
+    # Sort coordinates by angle around the centroid of unvisited nodes
+    # [B, 1, 2]
+    centroid = masked_coords.sum(dim=1, keepdim=True) / torch.clamp(num_unvisited, min=1)
+    # [B, N, 2]
+    centered_coords = masked_coords - centroid
+    # [B, N]
+    angles = torch.atan2(centered_coords[..., 1], centered_coords[..., 0])
+    # Sort indices based on angles
+    # [B, N]
+    sorted_indices = torch.argsort(angles, dim=1)
+    # [B, N, 2]
+    sorted_coords = torch.gather(masked_coords, 1, sorted_indices.unsqueeze(-1).expand(-1, -1, 2))
+
+    # Calculate the perimeter of this sorted polygon (approximate hull)
+    # Roll coordinates to get pairs of adjacent points (p_i, p_{i+1})
+    rolled_coords = torch.roll(sorted_coords, shifts=-1, dims=1)
+    # [B, N]
+    segment_lengths = torch.linalg.norm(sorted_coords - rolled_coords, dim=-1)
+    # Sum up lengths only for the unvisited nodes that form the hull
+    # We can approximate this by summing all segments and subtracting the one from the last unvisited to the first "large_coord" point
+    # A simpler, robust way is to mask out segments connected to placeholder points.
+    # A segment is valid if both its endpoints are not placeholder points.
+    # [B, N]
+    is_real_node = (sorted_coords[:, :, 0] < large_coord)
+    # [B, N]
+    is_next_real_node = torch.roll(is_real_node, shifts=-1, dims=1)
+    # [B, N]
+    valid_segment_mask = is_real_node & is_next_real_node
+    # [B, 1]
+    hull_perimeter = (segment_lengths * valid_segment_mask).sum(dim=1, keepdim=True)
+
+    # 2. Compute connection costs to the hull
+    # [B, N, N]
+    dist_matrix = state.distance_matrix()
+    # [B]
+    current_node = state.current_node_index()
+    # [B]
+    start_node = state.first_node_index()
+
+    # Min distance from current node to any unvisited node
+    # [B, 1, N]
+    current_node_exp = current_node.view(B, 1, 1).expand(-1, 1, N)
+    # [B, N]
+    dist_from_current = dist_matrix.gather(1, current_node_exp).squeeze(1)
+    # Set distances to visited nodes to infinity
+    dist_from_current_to_unvisited = dist_from_current.masked_fill(~unvisited_mask, float('inf'))
+    # [B, 1]
+    min_dist_from_current = torch.min(dist_from_current_to_unvisited, dim=1, keepdim=True).values
+
+    # Min distance from start node to any unvisited node
+    # [B, 1, N]
+    start_node_exp = start_node.view(B, 1, 1).expand(-1, 1, N)
+    # [B, N]
+    dist_from_start = dist_matrix.gather(1, start_node_exp).squeeze(1)
+    dist_from_start_to_unvisited = dist_from_start.masked_fill(~unvisited_mask, float('inf'))
+    # [B, 1]
+    min_dist_from_start = torch.min(dist_from_start_to_unvisited, dim=1, keepdim=True).values
+
+    # Replace inf with 0 for cases where no unvisited nodes are left (already handled by is_terminal)
+    min_dist_from_current = torch.nan_to_num(min_dist_from_current, posinf=0.0)
+    min_dist_from_start = torch.nan_to_num(min_dist_from_start, posinf=0.0)
+
+    # 3. Combine components
+    value = hull_perimeter + min_dist_from_current + min_dist_from_start
+
+    # Ensure terminal states have zero potential
+    final_value = torch.where(is_terminal, torch.zeros_like(value), value)
+
+    return final_value
+================================================================================
+Repairing code via llm...
+Requesting to LLM...
+Request cost time: 13.871484756469727 (s)
+[HeuristicFinder] Runtime error in phi(state): The size of tensor a (20) must match the size of tensor b (8192) at non-singleton dimension 1 
+ source code follows:
+================================================================================
+def phi(state):
+    """
+    Estimates future tour length using a centroid-based heuristic for unvisited nodes.
+    The cost is the sum of:
+    1. The average distance from the centroid of unvisited nodes to each unvisited node, scaled by the number of unvisited nodes.
+       This approximates the internal path length of the remaining tour.
+    2. The distance from the current node to the nearest unvisited node.
+    3. The distance from the start node to the nearest unvisited node.
+    This provides a stable and efficient geometric estimate of the remaining cost.
+    """
+    # [B, N, 2]
+    coords = state.all_node_coords()
+    B, N, _ = coords.shape
+    device = coords.device
+
+    # [B, N], True for unvisited
+    unvisited_mask = state.unvisited_mask()
+    # [B, 1]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True)
+
+    # Handle terminal states where num_unvisited is 0, 1, or 2.
+    # If 0 or 1, future cost is 0. If 2, it's the distance between them.
+    is_terminal = (num_unvisited <= 1)
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=device)
+
+    # 1. Internal path length approximation
+    # Use a large coordinate for visited nodes to avoid affecting the centroid
+    masked_coords = coords.where(unvisited_mask.unsqueeze(-1), torch.zeros_like(coords))
+    # [B, 1, 2]
+    centroid = masked_coords.sum(dim=1, keepdim=True) / torch.clamp(num_unvisited, min=1)
+    # [B, N]
+    dist_from_centroid = torch.linalg.norm(coords - centroid, dim=-1)
+    # [B, 1]
+    # Average distance from centroid to unvisited nodes, scaled by the count
+    # This approximates the "span" or "size" of the remaining problem
+    internal_tour_estimate = (dist_from_centroid * unvisited_mask).sum(dim=1, keepdim=True)
+
+    # 2. Connection costs to the unvisited cluster
+    # [B]
+    current_node_idx = state.current_node_index()
+    # [B]
+    start_node_idx = state.first_node_index()
+
+    # Create a distance matrix on the fly to avoid storing a large [B, N, N] tensor
+    # [B, N, 1, 2] vs [B, 1, N, 2] -> [B, N, N, 2] -> [B, N, N]
+    dist_matrix = torch.linalg.norm(coords.unsqueeze(2) - coords.unsqueeze(1), dim=-1)
+
+    # Gather distances from the current node
+    # [B, 1, N]
+    dist_from_current = dist_matrix.gather(1, current_node_idx.view(B, 1, 1).expand(-1, 1, N))
+    # Fill distances to already visited nodes with infinity
+    dist_from_current_to_unvisited = dist_from_current.squeeze(1).masked_fill(~unvisited_mask, float('inf'))
+    # [B, 1]
+    min_dist_from_current = torch.min(dist_from_current_to_unvisited, dim=1, keepdim=True).values
+
+    # Gather distances from the start node
+    # [B, 1, N]
+    dist_from_start = dist_matrix.gather(1, start_node_idx.view(B, 1, 1).expand(-1, 1, N))
+    dist_from_start_to_unvisited = dist_from_start.squeeze(1).masked_fill(~unvisited_mask, float('inf'))
+    # [B, 1]
+    min_dist_from_start = torch.min(dist_from_start_to_unvisited, dim=1, keepdim=True).values
+
+    # 3. Combine components and handle edge cases
+    # Replace any potential 'inf' values (e.g., when num_unvisited is 0) with 0.0
+    connection_cost = torch.nan_to_num(min_dist_from_current, posinf=0.0) + \
+                      torch.nan_to_num(min_dist_from_start, posinf=0.0)
+
+    # Special case for num_unvisited == 2
+    is_two_left = (num_unvisited == 2)
+    if is_two_left.any():
+        # For batches with exactly two nodes left, the future cost is simply their distance.
+        unvisited_coords = coords[is_two_left].view(-1, N, 2)[unvisited_mask[is_two_left].view(-1, N)].view(-1, 2, 2)
+        exact_cost = torch.linalg.norm(unvisited_coords[:, 0, :] - unvisited_coords[:, 1, :], dim=-1, keepdim=True)
+        # The connection cost is already part of this exact calculation, so we only need the exact_cost.
+        internal_tour_estimate[is_two_left] = exact_cost
+        connection_cost[is_two_left] = 0.0
+
+    # Final value estimate
+    value = internal_tour_estimate + connection_cost
+
+    # Ensure terminal states (0 or 1 unvisited) have zero potential
+    final_value = value.where(~is_terminal, torch.zeros_like(value))
+
+    # Clamp the magnitude to prevent extreme values, ensuring it remains a heuristic
+    return torch.clamp(final_value, max=N)
+================================================================================
+Repairing code via llm...
+Requesting to LLM...
+Request cost time: 15.113352060317993 (s)
+[HeuristicFinder] Runtime error in phi(state) during mse_phi_vs_value: The size of tensor a (20) must match the size of tensor b (8192) at non-singleton dimension 1
+ source code follows:
+================================================================================
+# THOUGHT: {auto}
+def phi(state):
+    """
+    Estimates future tour length using a centroid-based heuristic for unvisited nodes.
+    The cost is the sum of:
+    1. The average distance from the centroid of unvisited nodes to each unvisited node, scaled by the number of unvisited nodes.
+       This approximates the internal path length of the remaining tour.
+    2. The distance from the current node to the nearest unvisited node.
+    3. The distance from the start node to the nearest unvisited node.
+    This provides a stable and efficient geometric estimate of the remaining cost.
+    """
+    # [B, N, 2]
+    coords = state.all_node_coords()
+    B, N, _ = coords.shape
+    device = coords.device
+
+    # [B, N], True for unvisited
+    unvisited_mask = state.unvisited_mask()
+    # [B, 1]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True)
+
+    # Handle terminal states where num_unvisited is 0, 1, or 2.
+    # If 0 or 1, future cost is 0. If 2, it's the distance between them.
+    is_terminal = (num_unvisited <= 1)
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=device)
+
+    # 1. Internal path length approximation
+    # Use a large coordinate for visited nodes to avoid affecting the centroid
+    masked_coords = coords.where(unvisited_mask.unsqueeze(-1), torch.zeros_like(coords))
+    # [B, 1, 2]
+    centroid = masked_coords.sum(dim=1, keepdim=True) / torch.clamp(num_unvisited, min=1)
+    # [B, N]
+    dist_from_centroid = torch.linalg.norm(coords - centroid, dim=-1)
+    # [B, 1]
+    # Average distance from centroid to unvisited nodes, scaled by the count
+    # This approximates the "span" or "size" of the remaining problem
+    internal_tour_estimate = (dist_from_centroid * unvisited_mask).sum(dim=1, keepdim=True)
+
+    # 2. Connection costs to the unvisited cluster
+    # [B]
+    current_node_idx = state.current_node_index()
+    # [B]
+    start_node_idx = state.first_node_index()
+
+    # Create a distance matrix on the fly to avoid storing a large [B, N, N] tensor
+    # [B, N, 1, 2] vs [B, 1, N, 2] -> [B, N, N, 2] -> [B, N, N]
+    dist_matrix = torch.linalg.norm(coords.unsqueeze(2) - coords.unsqueeze(1), dim=-1)
+
+    # Gather distances from the current node
+    # [B, 1, N]
+    dist_from_current = dist_matrix.gather(1, current_node_idx.view(B, 1, 1).expand(-1, 1, N))
+    # Fill distances to already visited nodes with infinity
+    dist_from_current_to_unvisited = dist_from_current.squeeze(1).masked_fill(~unvisited_mask, float('inf'))
+    # [B, 1]
+    min_dist_from_current = torch.min(dist_from_current_to_unvisited, dim=1, keepdim=True).values
+
+    # Gather distances from the start node
+    # [B, 1, N]
+    dist_from_start = dist_matrix.gather(1, start_node_idx.view(B, 1, 1).expand(-1, 1, N))
+    dist_from_start_to_unvisited = dist_from_start.squeeze(1).masked_fill(~unvisited_mask, float('inf'))
+    # [B, 1]
+    min_dist_from_start = torch.min(dist_from_start_to_unvisited, dim=1, keepdim=True).values
+
+    # 3. Combine components and handle edge cases
+    # Replace any potential 'inf' values (e.g., when num_unvisited is 0) with 0.0
+    connection_cost = torch.nan_to_num(min_dist_from_current, posinf=0.0) + \
+                      torch.nan_to_num(min_dist_from_start, posinf=0.0)
+
+    # Special case for num_unvisited == 2
+    is_two_left = (num_unvisited == 2)
+    if is_two_left.any():
+        # For batches with exactly two nodes left, the future cost is simply their distance.
+        unvisited_coords = coords[is_two_left].view(-1, N, 2)[unvisited_mask[is_two_left].view(-1, N)].view(-1, 2, 2)
+        exact_cost = torch.linalg.norm(unvisited_coords[:, 0, :] - unvisited_coords[:, 1, :], dim=-1, keepdim=True)
+        # The connection cost is already part of this exact calculation, so we only need the exact_cost.
+        internal_tour_estimate[is_two_left] = exact_cost
+        connection_cost[is_two_left] = 0.0
+
+    # Final value estimate
+    value = internal_tour_estimate + connection_cost
+
+    # Ensure terminal states (0 or 1 unvisited) have zero potential
+    final_value = value.where(~is_terminal, torch.zeros_like(value))
+
+    # Clamp the magnitude to prevent extreme values, ensuring it remains a heuristic
+    return torch.clamp(final_value, max=N)
+================================================================================
+[HeuristicFinder] Runtime error in phi(state) during mse_phi_vs_value: The size of tensor a (20) must match the size of tensor b (8192) at non-singleton dimension 1
+ source code follows:
+================================================================================
+# THOUGHT: {auto}
+def phi(state):
+    """
+    Estimates future tour length using a centroid-based heuristic for unvisited nodes.
+    The cost is the sum of:
+    1. The average distance from the centroid of unvisited nodes to each unvisited node, scaled by the number of unvisited nodes.
+       This approximates the internal path length of the remaining tour.
+    2. The distance from the current node to the nearest unvisited node.
+    3. The distance from the start node to the nearest unvisited node.
+    This provides a stable and efficient geometric estimate of the remaining cost.
+    """
+    # [B, N, 2]
+    coords = state.all_node_coords()
+    B, N, _ = coords.shape
+    device = coords.device
+
+    # [B, N], True for unvisited
+    unvisited_mask = state.unvisited_mask()
+    # [B, 1]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True)
+
+    # Handle terminal states where num_unvisited is 0, 1, or 2.
+    # If 0 or 1, future cost is 0. If 2, it's the distance between them.
+    is_terminal = (num_unvisited <= 1)
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=device)
+
+    # 1. Internal path length approximation
+    # Use a large coordinate for visited nodes to avoid affecting the centroid
+    masked_coords = coords.where(unvisited_mask.unsqueeze(-1), torch.zeros_like(coords))
+    # [B, 1, 2]
+    centroid = masked_coords.sum(dim=1, keepdim=True) / torch.clamp(num_unvisited, min=1)
+    # [B, N]
+    dist_from_centroid = torch.linalg.norm(coords - centroid, dim=-1)
+    # [B, 1]
+    # Average distance from centroid to unvisited nodes, scaled by the count
+    # This approximates the "span" or "size" of the remaining problem
+    internal_tour_estimate = (dist_from_centroid * unvisited_mask).sum(dim=1, keepdim=True)
+
+    # 2. Connection costs to the unvisited cluster
+    # [B]
+    current_node_idx = state.current_node_index()
+    # [B]
+    start_node_idx = state.first_node_index()
+
+    # Create a distance matrix on the fly to avoid storing a large [B, N, N] tensor
+    # [B, N, 1, 2] vs [B, 1, N, 2] -> [B, N, N, 2] -> [B, N, N]
+    dist_matrix = torch.linalg.norm(coords.unsqueeze(2) - coords.unsqueeze(1), dim=-1)
+
+    # Gather distances from the current node
+    # [B, 1, N]
+    dist_from_current = dist_matrix.gather(1, current_node_idx.view(B, 1, 1).expand(-1, 1, N))
+    # Fill distances to already visited nodes with infinity
+    dist_from_current_to_unvisited = dist_from_current.squeeze(1).masked_fill(~unvisited_mask, float('inf'))
+    # [B, 1]
+    min_dist_from_current = torch.min(dist_from_current_to_unvisited, dim=1, keepdim=True).values
+
+    # Gather distances from the start node
+    # [B, 1, N]
+    dist_from_start = dist_matrix.gather(1, start_node_idx.view(B, 1, 1).expand(-1, 1, N))
+    dist_from_start_to_unvisited = dist_from_start.squeeze(1).masked_fill(~unvisited_mask, float('inf'))
+    # [B, 1]
+    min_dist_from_start = torch.min(dist_from_start_to_unvisited, dim=1, keepdim=True).values
+
+    # 3. Combine components and handle edge cases
+    # Replace any potential 'inf' values (e.g., when num_unvisited is 0) with 0.0
+    connection_cost = torch.nan_to_num(min_dist_from_current, posinf=0.0) + \
+                      torch.nan_to_num(min_dist_from_start, posinf=0.0)
+
+    # Special case for num_unvisited == 2
+    is_two_left = (num_unvisited == 2)
+    if is_two_left.any():
+        # For batches with exactly two nodes left, the future cost is simply their distance.
+        unvisited_coords = coords[is_two_left].view(-1, N, 2)[unvisited_mask[is_two_left].view(-1, N)].view(-1, 2, 2)
+        exact_cost = torch.linalg.norm(unvisited_coords[:, 0, :] - unvisited_coords[:, 1, :], dim=-1, keepdim=True)
+        # The connection cost is already part of this exact calculation, so we only need the exact_cost.
+        internal_tour_estimate[is_two_left] = exact_cost
+        connection_cost[is_two_left] = 0.0
+
+    # Final value estimate
+    value = internal_tour_estimate + connection_cost
+
+    # Ensure terminal states (0 or 1 unvisited) have zero potential
+    final_value = value.where(~is_terminal, torch.zeros_like(value))
+
+    # Clamp the magnitude to prevent extreme values, ensuring it remains a heuristic
+    return torch.clamp(final_value, max=N)
+================================================================================
+[HeuristicFinder] Runtime error in phi(state) during mse_phi_vs_value: The size of tensor a (50) must match the size of tensor b (8192) at non-singleton dimension 1
+ source code follows:
+================================================================================
+# THOUGHT: {auto}
+def phi(state):
+    """
+    Estimates future tour length using a centroid-based heuristic for unvisited nodes.
+    The cost is the sum of:
+    1. The average distance from the centroid of unvisited nodes to each unvisited node, scaled by the number of unvisited nodes.
+       This approximates the internal path length of the remaining tour.
+    2. The distance from the current node to the nearest unvisited node.
+    3. The distance from the start node to the nearest unvisited node.
+    This provides a stable and efficient geometric estimate of the remaining cost.
+    """
+    # [B, N, 2]
+    coords = state.all_node_coords()
+    B, N, _ = coords.shape
+    device = coords.device
+
+    # [B, N], True for unvisited
+    unvisited_mask = state.unvisited_mask()
+    # [B, 1]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True)
+
+    # Handle terminal states where num_unvisited is 0, 1, or 2.
+    # If 0 or 1, future cost is 0. If 2, it's the distance between them.
+    is_terminal = (num_unvisited <= 1)
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=device)
+
+    # 1. Internal path length approximation
+    # Use a large coordinate for visited nodes to avoid affecting the centroid
+    masked_coords = coords.where(unvisited_mask.unsqueeze(-1), torch.zeros_like(coords))
+    # [B, 1, 2]
+    centroid = masked_coords.sum(dim=1, keepdim=True) / torch.clamp(num_unvisited, min=1)
+    # [B, N]
+    dist_from_centroid = torch.linalg.norm(coords - centroid, dim=-1)
+    # [B, 1]
+    # Average distance from centroid to unvisited nodes, scaled by the count
+    # This approximates the "span" or "size" of the remaining problem
+    internal_tour_estimate = (dist_from_centroid * unvisited_mask).sum(dim=1, keepdim=True)
+
+    # 2. Connection costs to the unvisited cluster
+    # [B]
+    current_node_idx = state.current_node_index()
+    # [B]
+    start_node_idx = state.first_node_index()
+
+    # Create a distance matrix on the fly to avoid storing a large [B, N, N] tensor
+    # [B, N, 1, 2] vs [B, 1, N, 2] -> [B, N, N, 2] -> [B, N, N]
+    dist_matrix = torch.linalg.norm(coords.unsqueeze(2) - coords.unsqueeze(1), dim=-1)
+
+    # Gather distances from the current node
+    # [B, 1, N]
+    dist_from_current = dist_matrix.gather(1, current_node_idx.view(B, 1, 1).expand(-1, 1, N))
+    # Fill distances to already visited nodes with infinity
+    dist_from_current_to_unvisited = dist_from_current.squeeze(1).masked_fill(~unvisited_mask, float('inf'))
+    # [B, 1]
+    min_dist_from_current = torch.min(dist_from_current_to_unvisited, dim=1, keepdim=True).values
+
+    # Gather distances from the start node
+    # [B, 1, N]
+    dist_from_start = dist_matrix.gather(1, start_node_idx.view(B, 1, 1).expand(-1, 1, N))
+    dist_from_start_to_unvisited = dist_from_start.squeeze(1).masked_fill(~unvisited_mask, float('inf'))
+    # [B, 1]
+    min_dist_from_start = torch.min(dist_from_start_to_unvisited, dim=1, keepdim=True).values
+
+    # 3. Combine components and handle edge cases
+    # Replace any potential 'inf' values (e.g., when num_unvisited is 0) with 0.0
+    connection_cost = torch.nan_to_num(min_dist_from_current, posinf=0.0) + \
+                      torch.nan_to_num(min_dist_from_start, posinf=0.0)
+
+    # Special case for num_unvisited == 2
+    is_two_left = (num_unvisited == 2)
+    if is_two_left.any():
+        # For batches with exactly two nodes left, the future cost is simply their distance.
+        unvisited_coords = coords[is_two_left].view(-1, N, 2)[unvisited_mask[is_two_left].view(-1, N)].view(-1, 2, 2)
+        exact_cost = torch.linalg.norm(unvisited_coords[:, 0, :] - unvisited_coords[:, 1, :], dim=-1, keepdim=True)
+        # The connection cost is already part of this exact calculation, so we only need the exact_cost.
+        internal_tour_estimate[is_two_left] = exact_cost
+        connection_cost[is_two_left] = 0.0
+
+    # Final value estimate
+    value = internal_tour_estimate + connection_cost
+
+    # Ensure terminal states (0 or 1 unvisited) have zero potential
+    final_value = value.where(~is_terminal, torch.zeros_like(value))
+
+    # Clamp the magnitude to prevent extreme values, ensuring it remains a heuristic
+    return torch.clamp(final_value, max=N)
+================================================================================
+[HeuristicFinder] Runtime error in phi(state) during mse_phi_vs_value: The size of tensor a (100) must match the size of tensor b (8192) at non-singleton dimension 1
+ source code follows:
+================================================================================
+# THOUGHT: {auto}
+def phi(state):
+    """
+    Estimates future tour length using a centroid-based heuristic for unvisited nodes.
+    The cost is the sum of:
+    1. The average distance from the centroid of unvisited nodes to each unvisited node, scaled by the number of unvisited nodes.
+       This approximates the internal path length of the remaining tour.
+    2. The distance from the current node to the nearest unvisited node.
+    3. The distance from the start node to the nearest unvisited node.
+    This provides a stable and efficient geometric estimate of the remaining cost.
+    """
+    # [B, N, 2]
+    coords = state.all_node_coords()
+    B, N, _ = coords.shape
+    device = coords.device
+
+    # [B, N], True for unvisited
+    unvisited_mask = state.unvisited_mask()
+    # [B, 1]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True)
+
+    # Handle terminal states where num_unvisited is 0, 1, or 2.
+    # If 0 or 1, future cost is 0. If 2, it's the distance between them.
+    is_terminal = (num_unvisited <= 1)
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=device)
+
+    # 1. Internal path length approximation
+    # Use a large coordinate for visited nodes to avoid affecting the centroid
+    masked_coords = coords.where(unvisited_mask.unsqueeze(-1), torch.zeros_like(coords))
+    # [B, 1, 2]
+    centroid = masked_coords.sum(dim=1, keepdim=True) / torch.clamp(num_unvisited, min=1)
+    # [B, N]
+    dist_from_centroid = torch.linalg.norm(coords - centroid, dim=-1)
+    # [B, 1]
+    # Average distance from centroid to unvisited nodes, scaled by the count
+    # This approximates the "span" or "size" of the remaining problem
+    internal_tour_estimate = (dist_from_centroid * unvisited_mask).sum(dim=1, keepdim=True)
+
+    # 2. Connection costs to the unvisited cluster
+    # [B]
+    current_node_idx = state.current_node_index()
+    # [B]
+    start_node_idx = state.first_node_index()
+
+    # Create a distance matrix on the fly to avoid storing a large [B, N, N] tensor
+    # [B, N, 1, 2] vs [B, 1, N, 2] -> [B, N, N, 2] -> [B, N, N]
+    dist_matrix = torch.linalg.norm(coords.unsqueeze(2) - coords.unsqueeze(1), dim=-1)
+
+    # Gather distances from the current node
+    # [B, 1, N]
+    dist_from_current = dist_matrix.gather(1, current_node_idx.view(B, 1, 1).expand(-1, 1, N))
+    # Fill distances to already visited nodes with infinity
+    dist_from_current_to_unvisited = dist_from_current.squeeze(1).masked_fill(~unvisited_mask, float('inf'))
+    # [B, 1]
+    min_dist_from_current = torch.min(dist_from_current_to_unvisited, dim=1, keepdim=True).values
+
+    # Gather distances from the start node
+    # [B, 1, N]
+    dist_from_start = dist_matrix.gather(1, start_node_idx.view(B, 1, 1).expand(-1, 1, N))
+    dist_from_start_to_unvisited = dist_from_start.squeeze(1).masked_fill(~unvisited_mask, float('inf'))
+    # [B, 1]
+    min_dist_from_start = torch.min(dist_from_start_to_unvisited, dim=1, keepdim=True).values
+
+    # 3. Combine components and handle edge cases
+    # Replace any potential 'inf' values (e.g., when num_unvisited is 0) with 0.0
+    connection_cost = torch.nan_to_num(min_dist_from_current, posinf=0.0) + \
+                      torch.nan_to_num(min_dist_from_start, posinf=0.0)
+
+    # Special case for num_unvisited == 2
+    is_two_left = (num_unvisited == 2)
+    if is_two_left.any():
+        # For batches with exactly two nodes left, the future cost is simply their distance.
+        unvisited_coords = coords[is_two_left].view(-1, N, 2)[unvisited_mask[is_two_left].view(-1, N)].view(-1, 2, 2)
+        exact_cost = torch.linalg.norm(unvisited_coords[:, 0, :] - unvisited_coords[:, 1, :], dim=-1, keepdim=True)
+        # The connection cost is already part of this exact calculation, so we only need the exact_cost.
+        internal_tour_estimate[is_two_left] = exact_cost
+        connection_cost[is_two_left] = 0.0
+
+    # Final value estimate
+    value = internal_tour_estimate + connection_cost
+
+    # Ensure terminal states (0 or 1 unvisited) have zero potential
+    final_value = value.where(~is_terminal, torch.zeros_like(value))
+
+    # Clamp the magnitude to prevent extreme values, ensuring it remains a heuristic
+    return torch.clamp(final_value, max=N)
+================================================================================
+Requesting to LLM...
+Request cost time: 18.81079888343811 (s)
+Requesting to LLM...
+Request cost time: 14.849142789840698 (s)
+Requesting to LLM...
+Request cost time: 10.390520095825195 (s)
+Requesting to LLM...
+Request cost time: 13.654598236083984 (s)
+Requesting to LLM...
+Request cost time: 12.298580884933472 (s)
+Requesting to LLM...
+Request cost time: 14.136827230453491 (s)
+Requesting to LLM...
+Request cost time: 12.593812227249146 (s)
+Requesting to LLM...
+Request cost time: 15.879887819290161 (s)
+Requesting to LLM...
+Request cost time: 12.547729253768921 (s)
+Requesting to LLM...
+Request cost time: 14.939587831497192 (s)
+[HeuristicFinder] Runtime error in phi(state): The size of tensor a (20) must match the size of tensor b (8192) at non-singleton dimension 1 
+ source code follows:
+================================================================================
+def phi(state):
+    """
+    Estimates future tour length using a nearest-neighbor heuristic on the unvisited subgraph.
+    For each unvisited node, it finds the average cost of its two nearest unvisited neighbors.
+    The sum of these averages approximates the internal path cost of the remaining tour.
+    It then adds the cost to connect the current node and the start node to the unvisited set.
+    """
+    B, N, _ = state.all_node_coords().shape
+    device = state.all_node_coords().device
+    dist_matrix = state.distance_matrix()  # [B, N, N]
+    unvisited_mask = state.unvisited_mask()  # [B, N]
+    num_unvisited = unvisited_mask.sum(dim=1, keepdim=True).float()  # [B, 1]
+
+    # Handle terminal states (<= 2 unvisited nodes)
+    is_terminal = num_unvisited <= 2
+    if is_terminal.all():
+        return torch.zeros(B, 1, device=device)
+
+    # 1. Estimate internal cost of the unvisited subgraph
+    # Create a distance matrix for the subgraph of unvisited nodes
+    unvisited_dist_mask = unvisited_mask.unsqueeze(2) & unvisited_mask.unsqueeze(1)
+    subgraph_dists = torch.where(unvisited_dist_mask, dist_matrix, torch.full_like(dist_matrix, float('inf')))
+    # Set diagonal to infinity to avoid picking a node's distance to itself
+    subgraph_dists.diagonal(dim1=-2, dim2=-1).fill_(float('inf'))
+
+    # Find the k=2 smallest distances for each unvisited node to other unvisited nodes
+    # Using k=2 is a heuristic for the two edges connected to a node in a tour
+    k = 2
+    # We need to handle cases where there are fewer than k+1 unvisited nodes
+    # Clamp k to be at most num_unvisited - 1
+    safe_k = torch.clamp(num_unvisited.squeeze(-1).long() - 1, min=1, max=k).unsqueeze(-1) # [B, 1]
+
+    # Get top-k smallest distances. We sort and take the first k.
+    # Using sort is more robust than torch.topk for variable k across the batch.
+    sorted_dists, _ = torch.sort(subgraph_dists, dim=2)
+
+    # Select the top k distances for each node
+    # This will have shape [B, N, k] after gather, but we can't do that with variable k.
+    # Instead, we create a mask for the top-k elements.
+    k_range = torch.arange(N, device=device).view(1, 1, N)
+    k_mask = k_range < safe_k.unsqueeze(-1) # [B, 1, N]
+
+    # Mask out distances beyond the top-k for each batch item
+    top_k_dists = torch.where(k_mask, sorted_dists, 0.0) # [B, N, N]
+
+    # Calculate the average of the top-k distances for each unvisited node
+    sum_top_k = top_k_dists.sum(dim=2) # [B, N]
+    # Divide by safe_k, avoiding division by zero
+    avg_top_k_dist = sum_top_k / torch.clamp(safe_k.float().squeeze(-1), min=1.0) # [B, N]
+
+    # Sum these average costs only over the unvisited nodes
+    # Mask out visited nodes before summing
+    unvisited_node_costs = torch.where(unvisited_mask, avg_top_k_dist, 0.0)
+    # Summing and dividing by 2 because each edge is counted twice (once from each endpoint)
+    internal_cost = unvisited_node_costs.sum(dim=1, keepdim=True) / 2.0  # [B, 1]
+
+    # 2. Estimate connection costs to the unvisited subgraph
+    current_node_idx = state.current_node_index()  # [B]
+    start_node_idx = state.first_node_index()  # [B]
+
+    # Min distance from current node to any unvisited node
+    dist_from_current = dist_matrix.gather(1, current_node_idx.view(B, 1, 1).expand(-1, 1, N)).squeeze(1)
+    dist_from_current.masked_fill_(~unvisited_mask, float('inf'))
+    min_dist_from_current = torch.min(dist_from_current, dim=1, keepdim=True).values
+
+    # Min distance from start node to any unvisited node (for closing the tour)
+    dist_from_start = dist_matrix.gather(1, start_node_idx.view(B, 1, 1).expand(-1, 1, N)).squeeze(1)
+    dist_from_start.masked_fill_(~unvisited_mask, float('inf'))
+    min_dist_from_start = torch.min(dist_from_start, dim=1, keepdim=True).values
+
+    # Replace inf with 0 for cases where no unvisited nodes are left (handled by is_terminal check)
+    min_dist_from_current = torch.nan_to_num(min_dist_from_current, posinf=0.0)
+    min_dist_from_start = torch.nan_to_num(min_dist_from_start, posinf=0.0)
+
+    # 3. Combine components
+    value = min_dist_from_current + internal_cost + min_dist_from_start
+
+    # Ensure terminal states have zero potential
+    final_value = torch.where(is_terminal, torch.zeros_like(value), value)
+
+    return final_value
+================================================================================
+Repairing code via llm...
+Requesting to LLM...
+Request cost time: 12.99726915359497 (s)
+Requesting to LLM...
+Request cost time: 11.700404167175293 (s)
+Requesting to LLM...
+Request cost time: 11.258298397064209 (s)
+Requesting to LLM...
+Request cost time: 9.53941535949707 (s)
+Requesting to LLM...
+Request cost time: 12.932586908340454 (s)
+Requesting to LLM...
+Request cost time: 9.958317041397095 (s)
+Requesting to LLM...
+Request cost time: 13.208784580230713 (s)
+Requesting to LLM...
+Request cost time: 11.820217847824097 (s)
+Requesting to LLM...
+Request cost time: 10.003353357315063 (s)
+Requesting to LLM...
+Request cost time: 9.642852067947388 (s)
+Requesting to LLM...
+Request cost time: 10.153438568115234 (s)
+Evoving generation 2/20...
+Requesting to LLM...
+Request cost time: 17.33715009689331 (s)
+Requesting to LLM...
+Request cost time: 9.28972840309143 (s)
+Requesting to LLM...
+Request cost time: 14.678956270217896 (s)
+Requesting to LLM...
+Request cost time: 14.74770998954773 (s)
+Requesting to LLM...
+Request cost time: 11.875231266021729 (s)
+Requesting to LLM...
+Request cost time: 11.748915433883667 (s)
+Requesting to LLM...
+Request cost time: 16.922020196914673 (s)
+Requesting to LLM...
+Request cost time: 10.272150039672852 (s)
+Requesting to LLM...
+Request cost time: 13.682832956314087 (s)
+Requesting to LLM...
+Request cost time: 15.060555696487427 (s)
