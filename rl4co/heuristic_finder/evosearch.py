@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import glob
 import json
@@ -860,19 +860,19 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
 
 
 def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
-    """Evaluate a population of candidates using robust offline objectives as fitness.
+    """Evaluate candidates with robust offline objectives only (no MSE in fitness).
 
-    Fitness combines:
-      - robust point-wise regression (Huber on Phi vs Monte Carlo value)
-      - temporal smoothness / consistency of Delta-Phi vs step reward
-      - variance of Delta-Phi
-      - per-episode rank correlation between -Phi and -V(s)
+    Fitness per dataset:
+      - Huber on Phi vs Monte Carlo value
+      - Smoothness: Phi(s_t) - Phi(s_{t+1}) ~ r_t
+      - Variance of Delta-Phi
+      - Rank correlation between -Phi and -V(s)
+    Final fitness = worst (minimum) across datasets.
+    MSE is logged for diagnostics only.
     """
     if not specs:
         return []
 
-    # Load (and cache) offline trajectories containing states and Monte Carlo values.
-    # Support a main path for fitness and optional multiple paths for diagnostics.
     main_path = getattr(cfg, "offline_traj_path", None)
     multi_paths = getattr(cfg, "offline_traj_paths_multi", None) or []
     paths: List[str] = []
@@ -899,11 +899,7 @@ def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[C
             offline_sets[pth] = data
 
     assert offline_sets, f"can't find offline data in any of: {paths if paths else '[none specified]'}"
-    # Choose dataset used for fitness (default: cfg.offline_traj_path or first available)
-    fitness_path = main_path if (main_path and main_path in offline_sets) else next(iter(offline_sets.keys()))
-    fitness_trajs = offline_sets[fitness_path]
 
-    # Weights for combining robust objectives (kept local for now)
     lambda_point = 1.0
     lambda_smooth = 0.1
     lambda_var = 0.01
@@ -911,48 +907,10 @@ def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[C
 
     results: List[Tuple[Candidate, float]] = []
     for c in specs:
-        try:
-            mse = mse_phi_vs_value(
-                c.spec.fn,
-                fitness_trajs,
-                device=getattr(cfg, "cheap_eval_device", "cpu"),
-                batch_states=getattr(cfg, "cheap_eval_batch_states", None),
-                target="future_cost",
-            )
-        except Exception:
-            mse = float("inf")
-
-        if not math.isfinite(mse) or mse <= 0.0:
-            fitness = 0.0
-        else:
-            # MSE 的倒数作为适应度
-            fitness = 1.0 / float(mse)
-
-        # Attach simple stats for logging / dumps
         stats_dict: Dict[str, float] = {}
-        # Main dataset metrics
-        if math.isfinite(mse) and mse >= 0.0:
-            stats_dict["mse"] = float(mse)
-            try:
-                stats_dict["rmse"] = float(math.sqrt(mse))
-            except Exception:
-                stats_dict["rmse"] = float("nan")
+        fitness_per_dataset: List[float] = []
 
-        # Multi-scale diagnostics: per-dataset MSE/RMSE (e.g., tsp20/tsp50/tsp100).
         for pth, trajs in offline_sets.items():
-            try:
-                mse_k = mse_phi_vs_value(
-                    c.spec.fn,
-                    trajs,
-                    device=getattr(cfg, "cheap_eval_device", "cpu"),
-                    batch_states=getattr(cfg, "cheap_eval_batch_states", None),
-                    target="future_cost",
-                )
-            except Exception:
-                mse_k = float("inf")
-            if not math.isfinite(mse_k) or mse_k < 0.0:
-                continue
-            # Derive a short label from meta.num_loc if available, else from filename.
             label = None
             try:
                 meta = trajs.get("meta", {}) if isinstance(trajs, dict) else {}
@@ -964,51 +922,62 @@ def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[C
             if not label:
                 base = os.path.basename(pth)
                 label = os.path.splitext(base)[0]
-            key_mse = f"mse_{label}"
-            key_rmse = f"rmse_{label}"
-            stats_dict[key_mse] = float(mse_k)
-            try:
-                stats_dict[key_rmse] = float(math.sqrt(mse_k))
-            except Exception:
-                stats_dict[key_rmse] = float("nan")
 
-        # Override fitness: use worst-case (largest) MSE across all scales.
-        mse_worst = None
-        for key, val in stats_dict.items():
-            if not key.startswith("mse"):
-                continue
-            if key in ("mse_worst",):
-                continue
             try:
-                v = float(val)
+                robj = robust_phi_objectives(
+                    c.spec.fn,
+                    trajs,
+                    device=getattr(cfg, "cheap_eval_device", "cpu"),
+                    batch_states=getattr(cfg, "cheap_eval_batch_states", None),
+                    target="future_cost",
+                    huber_delta=1.0,
+                )
             except Exception:
-                continue
-            if not math.isfinite(v) or v < 0.0:
-                continue
-            if mse_worst is None or v > mse_worst:
-                mse_worst = v
-        if mse_worst is not None:
-            fitness = 1.0 / float(mse_worst)
-            stats_dict["mse_worst"] = float(mse_worst)
-            try:
-                stats_dict["rmse_worst"] = float(math.sqrt(mse_worst))
-            except Exception:
-                stats_dict["rmse_worst"] = float("nan")
-        else:
-            fitness = 0.0
+                robj = {
+                    "point_huber": float("inf"),
+                    "point_mse": float("inf"),
+                    "smooth_mse": float("inf"),
+                    "dphi_var": float("inf"),
+                    "mean_spearman": 0.0,
+                    "n_states": 0.0,
+                }
 
-        c.stats = stats_dict if stats_dict else None
+            point_huber = float(robj.get("point_huber", float("inf")))
+            point_mse = float(robj.get("point_mse", float("inf")))
+            smooth_mse = float(robj.get("smooth_mse", float("inf")))
+            dphi_var = float(robj.get("dphi_var", float("inf")))
+            mean_rank = float(robj.get("mean_spearman", 0.0))
+
+            if math.isfinite(point_huber):
+                fit_k = (
+                    -lambda_point * point_huber
+                    - lambda_smooth * smooth_mse
+                    - lambda_var * dphi_var
+                    + w_rank * mean_rank
+                )
+                fitness_per_dataset.append(fit_k)
+
+            # Diagnostics (MSE kept only for reporting)
+            if math.isfinite(point_mse):
+                stats_dict[f"mse_{label}"] = point_mse
+                try:
+                    stats_dict[f"rmse_{label}"] = float(math.sqrt(point_mse))
+                except Exception:
+                    stats_dict[f"rmse_{label}"] = float("nan")
+            if math.isfinite(point_huber):
+                stats_dict[f"huber_{label}"] = point_huber
+            if math.isfinite(smooth_mse):
+                stats_dict[f"smooth_{label}"] = smooth_mse
+            if math.isfinite(dphi_var):
+                stats_dict[f"dphi_var_{label}"] = dphi_var
+            if math.isfinite(mean_rank):
+                stats_dict[f"rank_{label}"] = mean_rank
+
+        fitness = min(fitness_per_dataset) if fitness_per_dataset else float("-inf")
+
         if stats_dict:
             parts = []
-            # Always show global mse/rmse first if present
-            if "mse" in stats_dict:
-                parts.append(f"mse={stats_dict['mse']:.6g}")
-            if "rmse" in stats_dict and math.isfinite(stats_dict["rmse"]):
-                parts.append(f"rmse={stats_dict['rmse']:.6g}")
-            # Then show per-dataset metrics in sorted order
             for k in sorted(stats_dict.keys()):
-                if k in ("mse", "rmse"):
-                    continue
                 v = stats_dict[k]
                 try:
                     if math.isfinite(v):
@@ -1019,46 +988,7 @@ def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[C
         else:
             c.stats_text = None
 
-        # Refine fitness with robust objectives (Huber / smoothness / variance / rank)
-        try:
-            robj = robust_phi_objectives(
-                c.spec.fn,
-                fitness_trajs,
-                device=getattr(cfg, "cheap_eval_device", "cpu"),
-                batch_states=getattr(cfg, "cheap_eval_batch_states", None),
-                target="future_cost",
-                huber_delta=1.0,
-            )
-            point_huber = float(robj.get("point_huber", float("inf")))
-            smooth_mse = float(robj.get("smooth_mse", float("inf")))
-            dphi_var = float(robj.get("dphi_var", float("inf")))
-            mean_rank = float(robj.get("mean_spearman", 0.0))
-
-            if math.isfinite(point_huber):
-                fitness = (
-                    -lambda_point * point_huber
-                    - lambda_smooth * smooth_mse
-                    - lambda_var * dphi_var
-                    + w_rank * mean_rank
-                )
-
-            # Augment stats with robust objectives for logging
-            if math.isfinite(point_huber):
-                c.stats = c.stats or {}
-                c.stats["point_huber"] = point_huber
-            if math.isfinite(smooth_mse):
-                c.stats = c.stats or {}
-                c.stats["smooth_mse"] = smooth_mse
-            if math.isfinite(dphi_var):
-                c.stats = c.stats or {}
-                c.stats["dphi_var"] = dphi_var
-            if math.isfinite(mean_rank):
-                c.stats = c.stats or {}
-                c.stats["rank_spearman"] = mean_rank
-        except Exception:
-            # Fall back to MSE-based fitness if robust evaluation fails
-            pass
-
+        c.stats = stats_dict if stats_dict else None
         results.append((c, float(fitness)))
 
     return results
