@@ -784,6 +784,11 @@ def _phi_prompt_parts(env_name: str = "tsp") -> Dict[str, object]:
         f"the {env_name.upper()} environment. Implement a Python function named 'phi' that"
         " takes a single input 'state' (TSPStateView) and returns a scalar per batch"
         " as a torch tensor broadcastable to [B,1]."
+        " Phi is used for potential-based reward shaping, and will be evaluated by robust objectives combining:"
+        " (a) a Huber loss between Phi(state) and V(state),"
+        " (b) temporal consistency of Delta-Phi with per-step reward (Phi(s_t) - Phi(s_{t+1}) ≈ r_t),"
+        " (c) variance of Delta-Phi, and"
+        " (d) rank correlation between -Phi(state) and -V(state) within each trajectory."
     )
     func_name = "phi"
     func_inputs = ["state"]

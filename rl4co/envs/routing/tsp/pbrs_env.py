@@ -245,6 +245,32 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
         # endpoint reward aligned with the original objective while making
         # intermediate rewards purely Delta-Phi.
         self._pure_shaping_terminal = bool(pure_shaping_terminal)
+        # Optional Delta-Phi normalization / clipping controls via env vars
+        # PBRS_CENTER_DPHI=1 centers Delta-Phi within batch
+        # PBRS_NORM_DPHI=1 normalizes Delta-Phi std within batch
+        # PBRS_DPHI_CLIP sets |Delta-Phi| clip (default 5.0)
+        # PBRS_LAMBDA scales shaping strength (default 0.1)
+        self._center_dphi = os.environ.get("PBRS_CENTER_DPHI", "0") not in (
+            "0",
+            "",
+            "false",
+            "False",
+        )
+        self._norm_dphi = os.environ.get("PBRS_NORM_DPHI", "0") not in (
+            "0",
+            "",
+            "false",
+            "False",
+        )
+        try:
+            self._dphi_clip = float(os.environ.get("PBRS_DPHI_CLIP", "5.0"))
+        except Exception:
+            self._dphi_clip = 5.0
+        try:
+            self._lambda = float(os.environ.get("PBRS_LAMBDA", "0.1"))
+        except Exception:
+            self._lambda = 0.1
+        self._lambda = max(0.0, float(self._lambda))
         # Optional logging controls via env vars
         # PBRS_LOG_PHI=1 enables logging; modes: first|stats|all; PBRS_LOG_PHI_EVERY for throttling
         self._log_phi_enabled = os.environ.get("PBRS_LOG_PHI", "0") not in ("0", "", "false", "False")
@@ -360,7 +386,24 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
         sv_after = self._build_state_view(td_next)
         phi_after = self._safe_phi(sv_after)
 
-        dphi = phi_after - phi_before
+        # Raw Delta-Phi
+        dphi = phi_after - phi_before  # [B,1]
+
+        # Batch-wise stabilization of Delta-Phi: center, normalize, and clip
+        dphi_norm = dphi.view(-1)
+        if self._center_dphi or self._norm_dphi:
+            mean = dphi_norm.mean()
+            if self._center_dphi:
+                dphi_norm = dphi_norm - mean
+            if self._norm_dphi:
+                std = dphi_norm.std(unbiased=False)
+                dphi_norm = dphi_norm / (std + 1e-6)
+        if self._dphi_clip is not None and self._dphi_clip > 0.0:
+            dphi_norm = torch.clamp(dphi_norm, -self._dphi_clip, self._dphi_clip)
+        dphi_shaped = dphi_norm.view_as(dphi)
+
+        # Effective shaping coefficient (small lambda for safety)
+        gamma_eff = float(self._gamma) * float(self._lambda)
 
         if self._pure_shaping_terminal:
             # Accumulate base reward but only add it to the shaped reward at terminal step.
@@ -368,13 +411,13 @@ class DensePBRSTSPEnv(DenseRewardTSPEnv):
             base_return_next = base_return_prev + base_reward
             td_next.set("base_return", base_return_next)
 
-            shaped = self._gamma * dphi
+            shaped = gamma_eff * dphi_shaped
             if done.any():
                 # Add endpoint (original) reward when trajectory finishes.
                 done_f = done.unsqueeze(-1).to(base_reward.dtype)
                 shaped = shaped + base_return_next * done_f
         else:
-            shaped = base_reward + self._gamma * dphi
+            shaped = base_reward + gamma_eff * dphi_shaped
 
         td_next.set("reward", shaped)
         td_next.set("done", done)

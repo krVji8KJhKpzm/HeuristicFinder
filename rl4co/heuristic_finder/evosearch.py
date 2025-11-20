@@ -11,7 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Set, Any
 
-from rl4co.heuristic_finder.potential_eval import cheap_score_phi, compute_phi_stats, mse_phi_vs_value
+from rl4co.heuristic_finder.potential_eval import (
+    cheap_score_phi,
+    compute_phi_stats,
+    mse_phi_vs_value,
+    robust_phi_objectives,
+)
 from rl4co.heuristic_finder.offline_data_tsp20 import load_offline_trajectories
 from rl4co.heuristic_finder.llm import (
     eoh_llm_i1,
@@ -855,10 +860,13 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
 
 
 def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
-    """Evaluate a population of candidates using offline MSE as fitness.
+    """Evaluate a population of candidates using robust offline objectives as fitness.
 
-    Fitness is defined as 1 / MSE(Phi(s), V(s)), where V(s) is the Monte Carlo
-    return-to-go of future tour length computed from pre-generated trajectories.
+    Fitness combines:
+      - robust point-wise regression (Huber on Phi vs Monte Carlo value)
+      - temporal smoothness / consistency of Delta-Phi vs step reward
+      - variance of Delta-Phi
+      - per-episode rank correlation between -Phi and -V(s)
     """
     if not specs:
         return []
@@ -894,6 +902,12 @@ def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[C
     # Choose dataset used for fitness (default: cfg.offline_traj_path or first available)
     fitness_path = main_path if (main_path and main_path in offline_sets) else next(iter(offline_sets.keys()))
     fitness_trajs = offline_sets[fitness_path]
+
+    # Weights for combining robust objectives (kept local for now)
+    lambda_point = 1.0
+    lambda_smooth = 0.1
+    lambda_var = 0.01
+    w_rank = 0.1
 
     results: List[Tuple[Candidate, float]] = []
     for c in specs:
@@ -1004,6 +1018,46 @@ def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[C
             c.stats_text = "; ".join(parts)
         else:
             c.stats_text = None
+
+        # Refine fitness with robust objectives (Huber / smoothness / variance / rank)
+        try:
+            robj = robust_phi_objectives(
+                c.spec.fn,
+                fitness_trajs,
+                device=getattr(cfg, "cheap_eval_device", "cpu"),
+                batch_states=getattr(cfg, "cheap_eval_batch_states", None),
+                target="future_cost",
+                huber_delta=1.0,
+            )
+            point_huber = float(robj.get("point_huber", float("inf")))
+            smooth_mse = float(robj.get("smooth_mse", float("inf")))
+            dphi_var = float(robj.get("dphi_var", float("inf")))
+            mean_rank = float(robj.get("mean_spearman", 0.0))
+
+            if math.isfinite(point_huber):
+                fitness = (
+                    -lambda_point * point_huber
+                    - lambda_smooth * smooth_mse
+                    - lambda_var * dphi_var
+                    + w_rank * mean_rank
+                )
+
+            # Augment stats with robust objectives for logging
+            if math.isfinite(point_huber):
+                c.stats = c.stats or {}
+                c.stats["point_huber"] = point_huber
+            if math.isfinite(smooth_mse):
+                c.stats = c.stats or {}
+                c.stats["smooth_mse"] = smooth_mse
+            if math.isfinite(dphi_var):
+                c.stats = c.stats or {}
+                c.stats["dphi_var"] = dphi_var
+            if math.isfinite(mean_rank):
+                c.stats = c.stats or {}
+                c.stats["rank_spearman"] = mean_rank
+        except Exception:
+            # Fall back to MSE-based fitness if robust evaluation fails
+            pass
 
         results.append((c, float(fitness)))
 

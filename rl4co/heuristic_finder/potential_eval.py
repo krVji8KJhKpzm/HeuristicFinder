@@ -42,6 +42,27 @@ def _pearsonr(x: torch.Tensor, y: torch.Tensor) -> Optional[float]:
     return float(r.item())
 
 
+def _spearmanr(x: torch.Tensor, y: torch.Tensor) -> Optional[float]:
+    """Spearman rank correlation implemented via ranking + Pearson."""
+    try:
+        x = torch.as_tensor(x, dtype=torch.float32).flatten()
+        y = torch.as_tensor(y, dtype=torch.float32).flatten()
+        if x.numel() < 2 or y.numel() < 2:
+            return None
+
+        def _ranks(v: torch.Tensor) -> torch.Tensor:
+            idx = torch.argsort(v, stable=True)
+            ranks = torch.empty_like(idx, dtype=torch.float32)
+            ranks[idx] = torch.arange(1, v.numel() + 1, dtype=torch.float32, device=v.device)
+            return ranks
+
+        rx = _ranks(x)
+        ry = _ranks(y)
+        return _pearsonr(rx, ry)
+    except Exception:
+        return None
+
+
 def _build_state_view(
     locs: torch.Tensor,
     i: int,
@@ -367,6 +388,271 @@ def cheap_score_phi(
     score -= float(config.get("complexity_penalty_alpha", 0.001)) * complexity
 
     return float(score), stats, float(complexity)
+
+
+def robust_phi_objectives(
+    phi_fn: Callable[[InvariantTSPStateView], torch.Tensor],
+    trajectories: Dict[str, Any],
+    device: str | torch.device = "cpu",
+    batch_states: Optional[int] = None,
+    target: str = "future_cost",
+    huber_delta: float = 1.0,
+) -> Dict[str, float]:
+    """Robust symbolic-regression objectives for Phi on offline trajectories.
+
+    Returns a dict with:
+      - point_huber: mean Huber loss between Phi(s_t) and target V(s_t)
+      - point_mse: mean squared error between Phi(s_t) and target V(s_t)
+      - smooth_mse: mean squared error of temporal consistency
+                    (Phi(s_t) - Phi(s_{t+1}) ≈ r_t)
+      - dphi_var: variance of Phi(s_t) - Phi(s_{t+1}) across all steps
+      - mean_spearman: mean Spearman rank correlation over episodes between
+                       -Phi(s_t) and -V(s_t)
+      - n_states: total number of evaluated states
+    """
+    episodes: List[Dict[str, Any]] = trajectories["episodes"]
+    device = torch.device(device)
+    bs = int(batch_states) if batch_states else 4096
+
+    # Buffers for batched evaluation of before/after states
+    b_locs: List[torch.Tensor] = []
+    b_i: List[int] = []
+    b_curr: List[int] = []
+    b_first: List[int] = []
+    b_mask: List[torch.Tensor] = []
+    a_locs: List[torch.Tensor] = []
+    a_i: List[int] = []
+    a_curr: List[int] = []
+    a_first: List[int] = []
+    a_mask: List[torch.Tensor] = []
+    b_targets: List[float] = []
+    b_r: List[float] = []
+    b_ep_idx: List[int] = []
+
+    # Aggregated objectives
+    point_huber_sum = 0.0
+    point_mse_sum = 0.0
+    smooth_mse_sum = 0.0
+    sum_dphi = 0.0
+    sum_dphi_sq = 0.0
+    n_total = 0
+    n_smooth = 0
+
+    # Per-episode sequences for rank-based signal
+    phi_per_ep: List[List[float]] = [[] for _ in range(len(episodes))]
+    tgt_per_ep: List[List[float]] = [[] for _ in range(len(episodes))]
+
+    def _flush() -> None:
+        nonlocal point_huber_sum, point_mse_sum, smooth_mse_sum, sum_dphi, sum_dphi_sq, n_total, n_smooth
+        if not b_locs:
+            return
+        with torch.no_grad():
+            locs_b = torch.stack(b_locs, dim=0).to(device)
+            i_b = torch.tensor(b_i, dtype=torch.int64, device=device)
+            cur_b = torch.tensor(b_curr, dtype=torch.int64, device=device)
+            fir_b = torch.tensor(b_first, dtype=torch.int64, device=device)
+            m_b = torch.stack(b_mask, dim=0).to(torch.bool).to(device)
+
+            locs_a = torch.stack(a_locs, dim=0).to(device)
+            i_a = torch.tensor(a_i, dtype=torch.int64, device=device)
+            cur_a = torch.tensor(a_curr, dtype=torch.int64, device=device)
+            fir_a = torch.tensor(a_first, dtype=torch.int64, device=device)
+            m_a = torch.stack(a_mask, dim=0).to(torch.bool).to(device)
+
+            targets_b = torch.tensor(b_targets, dtype=torch.float32, device=device)
+            r_b = torch.tensor(b_r, dtype=torch.float32, device=device)
+            ep_idx_b = list(b_ep_idx)
+
+            sv_b = _build_batched_state_view(locs_b, i_b, cur_b, fir_b, m_b, device)
+            sv_a = _build_batched_state_view(locs_a, i_a, cur_a, fir_a, m_a, device)
+            inv_b = InvariantTSPStateView(sv_b)
+            inv_a = InvariantTSPStateView(sv_a)
+
+            try:
+                phi_b = phi_fn(inv_b)
+                phi_a = phi_fn(inv_a)
+            except Exception as e:
+                src = getattr(phi_fn, "_source_code", None)
+                if src is not None:
+                    print(
+                        f"[HeuristicFinder] Runtime error in phi(state) during robust_phi_objectives: {e}\n source code follows:",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    try:
+                        print("=" * 80, file=sys.stderr, flush=True)
+                        print(src, file=sys.stderr, flush=True)
+                        print("=" * 80, file=sys.stderr, flush=True)
+                    except Exception:
+                        pass
+                raise
+
+            if not isinstance(phi_b, torch.Tensor):
+                phi_b = torch.as_tensor(phi_b, dtype=torch.float32, device=device)
+            if not isinstance(phi_a, torch.Tensor):
+                phi_a = torch.as_tensor(phi_a, dtype=torch.float32, device=device)
+            phi_b = torch.nan_to_num(phi_b, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32)
+            phi_a = torch.nan_to_num(phi_a, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32)
+            if phi_b.dim() > 1:
+                phi_b = phi_b.squeeze(-1)
+            if phi_a.dim() > 1:
+                phi_a = phi_a.squeeze(-1)
+
+            phi_b_flat = phi_b.view(-1)
+            phi_a_flat = phi_a.view(-1)
+            targets_flat = targets_b.view(-1)
+            r_flat = r_b.view(-1)
+
+            # Point-wise robust regression (Huber) and plain MSE
+            err = phi_b_flat - targets_flat
+            abs_err = err.abs()
+            delta = float(huber_delta)
+            quad = 0.5 * err * err
+            lin = delta * (abs_err - 0.5 * delta)
+            huber = torch.where(abs_err <= delta, quad, lin)
+
+            point_huber_sum += float(huber.sum().item())
+            point_mse_sum += float((err * err).sum().item())
+            n_total += int(err.numel())
+
+            # Trajectory smoothness: Phi(s_t) - Phi(s_{t+1}) ≈ r_t
+            dphi_step = phi_b_flat - phi_a_flat
+            smooth_err = dphi_step - r_flat
+            smooth_mse_sum += float((smooth_err * smooth_err).sum().item())
+            n_smooth += int(smooth_err.numel())
+
+            # Variance of Delta-Phi
+            sum_dphi += float(dphi_step.sum().item())
+            sum_dphi_sq += float((dphi_step * dphi_step).sum().item())
+
+            # Per-episode sequences for rank-based signal
+            for v_phi, v_tgt, ep in zip(
+                phi_b_flat.tolist(), targets_flat.tolist(), ep_idx_b
+            ):
+                phi_per_ep[ep].append(float(v_phi))
+                tgt_per_ep[ep].append(float(v_tgt))
+
+        # Clear buffers
+        b_locs.clear()
+        b_i.clear()
+        b_curr.clear()
+        b_first.clear()
+        b_mask.clear()
+        a_locs.clear()
+        a_i.clear()
+        a_curr.clear()
+        a_first.clear()
+        a_mask.clear()
+        b_targets.clear()
+        b_r.clear()
+        b_ep_idx.clear()
+
+    # Build batched before/after states and targets
+    for ep_idx, ep in enumerate(episodes):
+        locs = ep["locs"].to(torch.float32)
+        actions = ep["actions"].to(torch.long)
+        current_nodes = ep["current_nodes"].to(torch.long)
+        masks = ep["action_masks"].to(torch.bool)
+        r_base = ep["base_step_reward"].to(torch.float32)
+        T = actions.shape[0]
+
+        # Future tour length (sum of edge lengths ahead) or returns
+        cost_steps = (-r_base).flatten()
+        future_cost = torch.flip(torch.cumsum(torch.flip(cost_steps, dims=[0]), dim=0), dims=[0])
+        returns = ep.get("returns", None)
+        if returns is not None:
+            returns = returns.to(torch.float32)
+
+        for t in range(T):
+            # State before action at step t
+            b_locs.append(locs)
+            b_i.append(t)
+            b_curr.append(int(current_nodes[t].item()))
+            b_first.append(int(ep["first_node"]))
+            b_mask.append(masks[t])
+
+            # Approximate state after action at step t
+            next_i = t + 1
+            next_curr = int(actions[t].item())
+            mask_next = masks[t].clone()
+            mask_next[next_curr] = False
+            a_locs.append(locs)
+            a_i.append(next_i)
+            a_curr.append(next_curr)
+            a_first.append(int(ep["first_node"]))
+            a_mask.append(mask_next)
+
+            # Regression target and immediate reward for smoothness
+            if target == "future_cost":
+                tgt_val = float(future_cost[t].item())
+            elif target == "return":
+                if returns is None:
+                    raise ValueError("returns not present in trajectories for target='return'")
+                tgt_val = float(returns[t].item())
+            else:
+                raise ValueError(f"Unknown target type '{target}'")
+            b_targets.append(tgt_val)
+            b_r.append(float(r_base[t].item()))
+            b_ep_idx.append(ep_idx)
+
+            if len(b_locs) >= bs:
+                _flush()
+
+    _flush()
+
+    if n_total == 0:
+        # No valid states; treat as infinitely bad / empty
+        try:
+            if device.type == "cuda" and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        return {
+            "point_huber": float("inf"),
+            "point_mse": float("inf"),
+            "smooth_mse": float("inf"),
+            "dphi_var": float("inf"),
+            "mean_spearman": 0.0,
+            "n_states": 0.0,
+        }
+
+    point_huber = float(point_huber_sum / float(n_total))
+    point_mse = float(point_mse_sum / float(n_total))
+    smooth_mse = float(smooth_mse_sum / float(max(1, n_smooth)))
+    mean_dphi = float(sum_dphi / float(max(1, n_smooth)))
+    mean_dphi_sq = float(sum_dphi_sq / float(max(1, n_smooth)))
+    dphi_var = max(0.0, mean_dphi_sq - mean_dphi * mean_dphi)
+
+    # Per-episode rank correlation between -Phi and -target
+    rank_vals: List[float] = []
+    for ep_idx in range(len(episodes)):
+        phi_seq = phi_per_ep[ep_idx]
+        tgt_seq = tgt_per_ep[ep_idx]
+        if len(phi_seq) < 2 or len(tgt_seq) < 2:
+            continue
+        rc = _spearmanr(
+            -torch.tensor(phi_seq, dtype=torch.float32),
+            -torch.tensor(tgt_seq, dtype=torch.float32),
+        )
+        if rc is not None and math.isfinite(rc):
+            rank_vals.append(float(rc))
+    mean_rank = float(sum(rank_vals) / float(len(rank_vals))) if rank_vals else 0.0
+
+    # Proactively release cached GPU memory when using CUDA.
+    try:
+        if device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+    return {
+        "point_huber": point_huber,
+        "point_mse": point_mse,
+        "smooth_mse": smooth_mse,
+        "dphi_var": dphi_var,
+        "mean_spearman": mean_rank,
+        "n_states": float(n_total),
+    }
 
 
 def mse_phi_vs_value(

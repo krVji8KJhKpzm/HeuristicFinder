@@ -1,10 +1,16 @@
 """
 EoH-style multi-population search for a symbolic Phi(state) on TSP-20.
 
-Fitness is defined as the inverse mean-squared error between Phi(s) and an
-offline Monte Carlo estimate V(s) (future tour length) computed from a fixed
-baseline policy on randomly generated TSP instances. No RL training is run
-inside the loop; the task is pure symbolic regression on the offline dataset.
+Fitness is computed from offline trajectories using a robust objective that
+combines:
+  - Huber regression between Phi(s) and an offline Monte Carlo estimate V(s)
+  - a temporal smoothness term encouraging Phi(s_t) - Phi(s_{t+1}) ≈ r_t
+  - a variance penalty on Delta-Phi
+  - a rank-based term that prefers correct ordering of -Phi and -V(s)
+
+No RL training is run inside the loop; the task is still symbolic regression
+on the offline dataset, but with shape-aware, outlier-robust criteria instead
+of pure MSE.
 """
 
 from __future__ import annotations
@@ -206,31 +212,41 @@ def main():
     with open(save_path, "w", encoding="utf-8") as f:
         f.write(best_cand.spec.code)
 
-    # Fitness is 1 / MSE; report both fitness and estimated MSE
+    print(f"Saved best phi to: {save_path}")
     best_mse = None
+    best_huber = None
+    best_rank = None
     if isinstance(best_cand.stats, dict):
         best_mse = best_cand.stats.get("mse", None)
-    if best_mse is None and best_score > 0:
-        best_mse = 1.0 / float(best_score)
-
-    print(f"Saved best phi to: {save_path}")
+        best_huber = best_cand.stats.get("point_huber", None)
+        best_rank = best_cand.stats.get("rank_spearman", None)
+    msg = f"Best fitness={best_score:.6f}"
     if best_mse is not None and best_mse > 0 and math.isfinite(best_mse):
-        print(f"Best fitness (1/MSE): {best_score:.6f}, estimated MSE: {best_mse:.6f}")
-    else:
-        print(f"Best fitness (1/MSE): {best_score:.6f}, estimated MSE unavailable")
+        msg += f", mse={best_mse:.6f}"
+    if best_huber is not None and math.isfinite(best_huber):
+        msg += f", huber={best_huber:.6f}"
+    if best_rank is not None and math.isfinite(best_rank):
+        msg += f", rank={best_rank:.4f}"
+    print(msg)
 
     print("=== Top Candidates ===")
     for cand, score in results[: args.topk]:
         mse = None
+        huber = None
+        rank = None
         if isinstance(cand.stats, dict):
             mse = cand.stats.get("mse", None)
-        if mse is None and score > 0:
-            mse = 1.0 / float(score)
+            huber = cand.stats.get("point_huber", None)
+            rank = cand.stats.get("rank_spearman", None)
+        extras = []
         if mse is not None and mse > 0 and math.isfinite(mse):
-            extra = f"mse={mse:.6f}"
-        else:
-            extra = "mse=n/a"
-        print(f"{cand.spec.name} [gamma={cand.gamma:+.3f}]: fitness={score:.6f}, {extra}")
+            extras.append(f"mse={mse:.6f}")
+        if huber is not None and math.isfinite(huber):
+            extras.append(f"huber={huber:.6f}")
+        if rank is not None and math.isfinite(rank):
+            extras.append(f"rank={rank:.4f}")
+        extra_str = ", ".join(extras) if extras else "no_stats"
+        print(f"{cand.spec.name} [gamma={cand.gamma:+.3f}]: fitness={score:.6f}, {extra_str}")
     # 3) Optional: Start full training via run.py (Hydra)
     if args.train_after:
         cmd: List[str] = ["python", "run.py", "experiment=routing/pomopbrs-tsp20.yaml"]
