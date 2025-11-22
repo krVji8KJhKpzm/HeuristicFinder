@@ -114,6 +114,25 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--refine-top-k", type=int, default=0)
     p.add_argument("--refine-epochs", type=int, default=0)
+    # Optional listwise preference-based fitness
+    p.add_argument(
+        "--listwise-data-path",
+        type=str,
+        default=None,
+        help="Path to listwise offline TSP dataset (.pt) with coords/visited_seq/rank_in_list.",
+    )
+    p.add_argument(
+        "--listwise-max-lists",
+        type=int,
+        default=None,
+        help="Max number of lists to use per candidate when computing preference fitness.",
+    )
+    p.add_argument(
+        "--listwise-pair-weight",
+        type=float,
+        default=0.5,
+        help="Weight for pairwise accuracy term in listwise fitness.",
+    )
 
     # Train after search
     p.add_argument("--train-after", action="store_true")
@@ -200,6 +219,9 @@ def main():
         use_cheap_level=not bool(args.no_cheap_level),
         use_level2_rl=not bool(args.no_level2_rl),
         log_evo_details=bool(args.log_evo_details),
+        listwise_data_path=args.listwise_data_path,
+        listwise_max_lists=args.listwise_max_lists,
+        listwise_pair_weight=float(args.listwise_pair_weight),
     )
     results = evolution_search(cfg)
 

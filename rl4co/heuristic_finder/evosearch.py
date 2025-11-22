@@ -11,11 +11,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Set, Any
 
+import torch
+
 from rl4co.heuristic_finder.potential_eval import (
     cheap_score_phi,
     compute_phi_stats,
     mse_phi_vs_value,
     robust_phi_objectives,
+    listwise_preference_objectives,
 )
 from rl4co.heuristic_finder.offline_data_tsp20 import load_offline_trajectories
 from rl4co.heuristic_finder.llm import (
@@ -131,6 +134,10 @@ class EvoConfig:
     stats_batch_size: int = 64
     # Logging / diagnostics
     log_evo_details: bool = False
+    # Listwise preference-based fitness (optional)
+    listwise_data_path: Optional[str] = None  # path to listwise offline dataset (.pt)
+    listwise_max_lists: Optional[int] = None  # cap number of lists per evaluation
+    listwise_pair_weight: float = 0.5  # weight for pairwise accuracy in fitness
 
 
 def compile_candidates(codes: List[str]) -> List[PotentialSpec]:
@@ -753,8 +760,12 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
                     f"total_init_cands={len(init_cands)}",
                     flush=True,
                 )
-        # Evaluate and keep top-N (fitness is 1 / MSE over worst-case multi-scale MSE)
-        scored_init = _evaluate_population(init_cands, cfg)
+        # Evaluate and keep top-N.
+        # If a listwise dataset is configured, use preference-only fitness; otherwise fall back to MSE-based fitness.
+        if getattr(cfg, "listwise_data_path", None):
+            scored_init = _evaluate_population_listwise(init_cands, cfg)
+        else:
+            scored_init = _evaluate_population(init_cands, cfg)
         scored_init.sort(key=lambda x: x[1], reverse=True)
         scored_init = scored_init[:pop_size]
         populations.append(scored_init)
@@ -818,7 +829,10 @@ def evolution_search(cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
                         )
                     continue
 
-                off_results = _evaluate_population(filtered, cfg)
+                if getattr(cfg, "listwise_data_path", None):
+                    off_results = _evaluate_population_listwise(filtered, cfg)
+                else:
+                    off_results = _evaluate_population(filtered, cfg)
                 if debug:
                     print(
                         f"[Evo] Gen {gen_idx}, pop {pop_idx}, op={op}: "
@@ -1058,6 +1072,87 @@ def _evaluate_population(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[C
         except Exception:
             # Fall back to MSE-based fitness if robust evaluation fails
             pass
+
+        results.append((c, float(fitness)))
+
+    return results
+
+
+def _evaluate_population_listwise(specs: List[Candidate], cfg: EvoConfig) -> List[Tuple[Candidate, float]]:
+    """Preference-only fitness based on listwise offline data.
+
+    Uses only within-list ranking labels and does not regress numeric cost-to-go.
+    """
+    if not specs:
+        return []
+
+    path = getattr(cfg, "listwise_data_path", None)
+    if not path:
+        # Fallback to original MSE-based evaluation if no listwise dataset is configured
+        return _evaluate_population(specs, cfg)
+
+    if path in _OFFLINE_TRAJ_CACHE:
+        obj = _OFFLINE_TRAJ_CACHE[path]
+    elif os.path.exists(path):
+        try:
+            obj = torch.load(path, map_location="cpu")
+            _OFFLINE_TRAJ_CACHE[path] = obj
+        except Exception:
+            obj = None
+    else:
+        obj = None
+
+    if not (isinstance(obj, dict) and "coords" in obj):
+        # No valid listwise dataset; fall back to MSE-based fitness
+        return _evaluate_population(specs, cfg)
+
+    data = obj
+    lambda_pair = float(getattr(cfg, "listwise_pair_weight", 0.5))
+    max_lists = getattr(cfg, "listwise_max_lists", None)
+    dev = getattr(cfg, "cheap_eval_device", "cpu")
+    bs = getattr(cfg, "cheap_eval_batch_states", None)
+
+    results: List[Tuple[Candidate, float]] = []
+    for c in specs:
+        stats_dict: Dict[str, float] = {}
+        try:
+            obj_metrics = listwise_preference_objectives(
+                c.spec.fn,
+                data,
+                device=dev,
+                batch_states=bs,
+                max_lists=max_lists,
+            )
+            top1 = float(obj_metrics.get("top1_acc", 0.0))
+            pair_acc = float(obj_metrics.get("pair_acc", 0.0))
+            err_rate = float(obj_metrics.get("error_rate", 0.0))
+
+            # Fitness: higher is better; penalty for runtime errors
+            penalty = 10.0 * max(0.0, err_rate)
+            fitness = top1 + lambda_pair * pair_acc - penalty
+
+            stats_dict["lw_top1"] = top1
+            stats_dict["lw_pair"] = pair_acc
+            stats_dict["lw_error_rate"] = err_rate
+            stats_dict["lw_n_lists"] = float(obj_metrics.get("n_lists", 0.0))
+            stats_dict["lw_n_lists_valid"] = float(obj_metrics.get("n_lists_valid", 0.0))
+            stats_dict["lw_n_pairs"] = float(obj_metrics.get("n_pairs", 0.0))
+        except Exception:
+            fitness = -1e6
+            stats_dict["lw_error_rate"] = 1.0
+
+        c.stats = stats_dict if stats_dict else None
+        if stats_dict:
+            parts = []
+            if "lw_top1" in stats_dict:
+                parts.append(f"lw_top1={stats_dict['lw_top1']:.4f}")
+            if "lw_pair" in stats_dict:
+                parts.append(f"lw_pair={stats_dict['lw_pair']:.4f}")
+            if "lw_error_rate" in stats_dict:
+                parts.append(f"lw_err={stats_dict['lw_error_rate']:.4f}")
+            c.stats_text = "; ".join(parts)
+        else:
+            c.stats_text = None
 
         results.append((c, float(fitness)))
 

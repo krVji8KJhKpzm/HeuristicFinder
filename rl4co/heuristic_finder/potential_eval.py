@@ -793,3 +793,190 @@ def mse_phi_vs_value(
         pass
 
     return mse
+
+
+def listwise_preference_objectives(
+    phi_fn: Callable[[InvariantTSPStateView], torch.Tensor],
+    data: Dict[str, Any],
+    device: str | torch.device = "cpu",
+    batch_states: Optional[int] = None,
+    max_lists: Optional[int] = None,
+) -> Dict[str, float]:
+    """Evaluate Phi using listwise preferences only (no numeric cost regression).
+
+    The input `data` is expected to follow the format produced by
+    `offline_data_tsp_listwise.collect_tsp_listwise`, with at least:
+      - coords: [num_instances, num_nodes, 2]
+      - visited_seq: [num_states, num_nodes] (padded with -1)
+      - visited_mask: [num_states, num_nodes] (True if visited)
+      - last_node: [num_states]
+      - instance_id: [num_states]
+      - time_step: [num_states]
+      - list_id: [num_states]
+      - rank_in_list: [num_states]
+      - is_best: [num_states]
+
+    Returns a dict with:
+      - top1_acc: fraction of lists where argmin Phi matches the best state
+      - pair_acc: fraction of correctly ordered pairs within lists
+      - error_rate: fraction of lists where Phi evaluation failed
+      - n_lists, n_lists_valid, n_pairs: basic counters
+    """
+    del batch_states  # currently unused; kept for API symmetry
+
+    device = torch.device(device)
+
+    coords = torch.as_tensor(data["coords"], dtype=torch.float32)  # [I, N, 2]
+    visited_seq = torch.as_tensor(data["visited_seq"], dtype=torch.long)  # [S, N]
+    visited_mask = torch.as_tensor(data["visited_mask"], dtype=torch.bool)  # [S, N]
+    last_node = torch.as_tensor(data["last_node"], dtype=torch.long)  # [S]
+    instance_id = torch.as_tensor(data["instance_id"], dtype=torch.long)  # [S]
+    time_step = torch.as_tensor(data["time_step"], dtype=torch.long)  # [S]
+    list_id = torch.as_tensor(data["list_id"], dtype=torch.long)  # [S]
+    rank_in_list = torch.as_tensor(data["rank_in_list"], dtype=torch.long)  # [S]
+    is_best = torch.as_tensor(data.get("is_best", torch.zeros_like(rank_in_list)), dtype=torch.bool)
+
+    num_instances, num_nodes, _ = coords.shape
+    S = list_id.numel()
+    if S == 0 or num_instances == 0:
+        return {
+            "top1_acc": 0.0,
+            "pair_acc": 0.0,
+            "error_rate": 1.0,
+            "n_lists": 0.0,
+            "n_lists_valid": 0.0,
+            "n_pairs": 0.0,
+        }
+
+    unique_lists = torch.unique(list_id).tolist()
+    if max_lists is not None and max_lists > 0 and len(unique_lists) > max_lists:
+        unique_lists = unique_lists[: int(max_lists)]
+
+    n_lists = len(unique_lists)
+    n_valid_lists = 0
+    n_top1_correct = 0
+    n_pairs_total = 0
+    n_pairs_correct = 0
+    n_error_lists = 0
+
+    for lid in unique_lists:
+        idx = (list_id == lid).nonzero(as_tuple=False).flatten()
+        K = idx.numel()
+        if K == 0:
+            continue
+
+        # Require at least 2 states in a list to meaningfully evaluate ranking
+        if K < 2:
+            continue
+
+        try:
+            inst = instance_id[idx]  # [K]
+            if (inst < 0).any() or (inst >= num_instances).any():
+                n_error_lists += 1
+                continue
+
+            # Gather per-state fields for this list
+            locs_b = coords[inst]  # [K, N, 2]
+            i_b = time_step[idx]  # [K]
+            cur_b = last_node[idx]  # [K]
+            # first node is the first non-negative entry in visited_seq row; by construction this is visited_seq[:,0]
+            first_b = visited_seq[idx, 0].clamp(min=0)  # [K]
+            # action_mask: True for not yet visited
+            action_mask_b = (~visited_mask[idx]).to(torch.bool)  # [K, N]
+
+            # Build batched TSPStateView and evaluate Phi
+            locs_b = locs_b.to(device=device)
+            i_b = i_b.to(device=device, dtype=torch.int64)
+            cur_b = cur_b.to(device=device, dtype=torch.int64)
+            first_b = first_b.to(device=device, dtype=torch.int64)
+            action_mask_b = action_mask_b.to(device=device, dtype=torch.bool)
+
+            sv = _build_batched_state_view(locs_b, i_b, cur_b, first_b, action_mask_b, device)
+            inv = InvariantTSPStateView(sv)
+
+            with torch.no_grad():
+                phi_vals = phi_fn(inv)
+
+            if not isinstance(phi_vals, torch.Tensor):
+                phi_vals = torch.as_tensor(phi_vals, dtype=torch.float32, device=device)
+            phi_vals = torch.nan_to_num(phi_vals, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32)
+            if phi_vals.dim() > 1:
+                phi_vals = phi_vals.squeeze(-1)
+            phi_vals = phi_vals.view(-1).cpu()
+        except Exception as e:
+            src = getattr(phi_fn, "_source_code", None)
+            if src is not None:
+                print(
+                    f"[HeuristicFinder] Runtime error in phi(state) during listwise_preference_objectives: {e}\n source code follows:",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                try:
+                    print("=" * 80, file=sys.stderr, flush=True)
+                    print(src, file=sys.stderr, flush=True)
+                    print("=" * 80, file=sys.stderr, flush=True)
+                except Exception:
+                    pass
+            n_error_lists += 1
+            continue
+
+        # Ground-truth ranking within this list
+        ranks = rank_in_list[idx].to(torch.long).cpu()  # [K]
+        if ranks.numel() != phi_vals.numel():
+            K = min(ranks.numel(), phi_vals.numel())
+            ranks = ranks[:K]
+            phi_vals = phi_vals[:K]
+            if K < 2:
+                continue
+
+        n_valid_lists += 1
+
+        # Top-1 accuracy: does argmin(phi) match any best state?
+        gt_best_mask = (ranks == ranks.min())
+        if gt_best_mask.sum() == 0:
+            gt_best_mask = (ranks == 0)
+        pred_best_idx = int(torch.argmin(phi_vals).item())
+        if gt_best_mask[pred_best_idx]:
+            n_top1_correct += 1
+
+        # Pairwise accuracy over all (i, j) with distinct ranks
+        K = ranks.numel()
+        for i_idx in range(K):
+            for j_idx in range(i_idx + 1, K):
+                ri = int(ranks[i_idx].item())
+                rj = int(ranks[j_idx].item())
+                if ri == rj:
+                    continue
+                gt = -1 if ri < rj else 1  # smaller rank is better
+                dv = float(phi_vals[i_idx].item() - phi_vals[j_idx].item())
+                if dv == 0.0:
+                    # treat exact ties as neither correct nor incorrect
+                    continue
+                pred = -1 if dv < 0.0 else 1  # smaller phi is better
+                n_pairs_total += 1
+                if pred == gt:
+                    n_pairs_correct += 1
+
+    if n_valid_lists == 0:
+        error_rate = 1.0 if n_error_lists > 0 else 0.0
+        return {
+            "top1_acc": 0.0,
+            "pair_acc": 0.0,
+            "error_rate": float(error_rate),
+            "n_lists": float(n_lists),
+            "n_lists_valid": float(0),
+            "n_pairs": float(0),
+        }
+
+    top1_acc = float(n_top1_correct) / float(n_valid_lists)
+    pair_acc = float(n_pairs_correct) / float(n_pairs_total) if n_pairs_total > 0 else 0.0
+    error_rate = float(n_error_lists) / float(n_valid_lists + n_error_lists)
+
+    return {
+        "top1_acc": float(top1_acc),
+        "pair_acc": float(pair_acc),
+        "error_rate": float(error_rate),
+        "n_lists": float(n_lists),
+        "n_lists_valid": float(n_valid_lists),
+        "n_pairs": float(n_pairs_total),
+    }
