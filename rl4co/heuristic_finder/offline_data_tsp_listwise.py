@@ -364,6 +364,17 @@ def collect_tsp_listwise(
 
         instances_generated += B
 
+        # Lightweight textual progress indicator (instances)
+        try:
+            print(
+                f"[INFO] Collecting listwise TSP data: "
+                f"{instances_generated}/{n_instances} instances",
+                end="\r",
+                flush=True,
+            )
+        except Exception:
+            pass
+
         if max_states is not None and state_index >= max_states:
             break
 
