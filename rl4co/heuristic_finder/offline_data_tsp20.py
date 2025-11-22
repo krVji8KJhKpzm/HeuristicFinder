@@ -316,6 +316,7 @@ def collect_tsp20_trajectories(
             model = POMO.load_from_checkpoint(
                 ckpt_path, env=base_env, load_baseline=False
             )
+            print(f"Loaded POMO model from checkpoint: {ckpt_path}", flush=True)
         else:
             model = POMO(env=base_env)
         model.eval()

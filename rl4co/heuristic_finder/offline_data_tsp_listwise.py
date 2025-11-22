@@ -210,6 +210,8 @@ def collect_tsp_listwise(
     model: POMO = POMO.load_from_checkpoint(
         ckpt_path, env=base_env, load_baseline=False
     )
+
+    print(f"[INFO] Loaded POMO checkpoint from {ckpt_path} for num_loc={num_loc}.")
     model.eval()
 
     try:

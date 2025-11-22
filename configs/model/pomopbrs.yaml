@@ -8,7 +8,7 @@ potential: seed:neg_remaining
 
 # PBRS shaping controls
 # Discount factor used in shaping term gamma * (Phi(s_{t+1}) - Phi(s_t))
-pbrs_gamma: 1.0
+pbrs_gamma: 0.01
 # If true, use pure Delta-Phi shaping on intermediate steps and add the
 # original dense reward only at the terminal step.
 use_pure_shaping: false

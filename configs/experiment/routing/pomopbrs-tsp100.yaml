@@ -1,0 +1,40 @@
+# @package _global_
+
+defaults:
+  - override /model: pomopbrs.yaml
+  - override /env: tsp.yaml
+  - override /callbacks: default.yaml
+  - override /trainer: default.yaml
+  - override /logger: csv.yaml
+
+env:
+  # Use classic TSPEnv; PBRS env is constructed inside the model for shaping
+  generator_params:
+    num_loc: 100
+
+logger:
+  csv:
+    name: pomopbrs-tsp100
+
+trainer:
+  max_epochs: 100
+  precision: 32-true
+
+model:
+  # Choose potential here; change to your discovered best
+  potential: seed:neg_remaining
+
+  # Data & training sizes
+  batch_size: 64
+  train_data_size: 100000
+  val_data_size: 10000
+  test_data_size: 10000
+
+  # Optimization
+  optimizer_kwargs:
+    lr: 1e-4
+    weight_decay: 1e-6
+  lr_scheduler: "MultiStepLR"
+  lr_scheduler_kwargs:
+    milestones: [80, 95]
+    gamma: 0.1
